@@ -643,6 +643,15 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     date_var          = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
     time_var          = tk.StringVar(value=datetime.now().strftime("%H:%M"))
     person_var        = tk.StringVar()
+    
+    # Register form variables to sync with the sidebar clock
+    if sidebar_nav:
+        # Access the parent scope's form_vars dictionary through root
+        try:
+            root.form_vars["date_var"] = date_var
+            root.form_vars["time_var"] = time_var
+        except Exception:
+            pass
 
     # Row 1: Full Name + Contact
     row1 = tk.Frame(form_outer, bg=C_WHITE)
@@ -1507,23 +1516,18 @@ def main():
                           justify="left")
     clock_lbl.pack(side="left")
 
+    # Store form variables globally so they can be synced with the clock
+    form_vars = {"date_var": None, "time_var": None}
+
     def update_clock():
         now = datetime.now()
         clock_var.set(f"{now.strftime('%A, %B %d, %Y')}\n{now.strftime('%I:%M:%S %p')}")
         
-        # Sync form variables if they exist in the current layout context
-        try:
-            if 'date_var' in globals():
-                date_var.set(now.strftime("%Y-%m-%d"))
-            elif 'date_var' in locals():
-                locals()['date_var'].set(now.strftime("%Y-%m-%d"))
-                
-            if 'time_var' in globals():
-                time_var.set(now.strftime("%H:%M"))
-            elif 'time_var' in locals():
-                locals()['time_var'].set(now.strftime("%H:%M"))
-        except Exception:
-            pass # Failsafe context if variables aren't initialized yet
+        # Sync form variables if they are set
+        if form_vars["date_var"] is not None:
+            form_vars["date_var"].set(now.strftime("%Y-%m-%d"))
+        if form_vars["time_var"] is not None:
+            form_vars["time_var"].set(now.strftime("%H:%M"))
             
         root.after(1000, update_clock)
     update_clock()
@@ -1541,6 +1545,9 @@ def main():
     # Share nav updater
     sidebar_nav = {"update": update_nav}
     main_frame_widget = mf
+    
+    # Attach form_vars to root so it can be accessed from show_user_screen
+    root.form_vars = form_vars
 
     show_user_screen(root, mf, sidebar_nav)
     root.mainloop()
