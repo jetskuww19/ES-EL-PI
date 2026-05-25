@@ -205,6 +205,32 @@ def make_input_field(parent, label_text, var, placeholder="", icon="", width=Non
     
     return frame, widget
 
+
+def create_rounded_card_container(parent, width, height, bg, fill, outline, radius=24, padding=12):
+    """Create a rounded card background and inner content frame."""
+    try:
+        from PIL import Image, ImageTk, ImageDraw
+        # Start fully transparent so corners outside the rounded rect are see-through
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle((0, 0, width, height), radius=radius, fill=fill, outline=outline, width=1)
+        photo = ImageTk.PhotoImage(img)
+        # Canvas bg must match the parent's bg so transparency blends correctly
+        parent_bg = parent["bg"]
+        canvas = tk.Canvas(parent, width=width, height=height,
+                           bg=parent_bg, highlightthickness=0)
+        canvas.image_ref = photo
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+        inner = tk.Frame(canvas, bg=fill)
+        canvas.create_window(padding, padding, anchor="nw", window=inner,
+                             width=width - 2 * padding, height=height - 2 * padding)
+        return canvas, inner
+    except Exception:
+        frame = tk.Frame(parent, bg=fill,
+                         highlightbackground=outline,
+                         highlightthickness=1)
+        return frame, frame
+
 # ============================================================
 #  LOGIN WINDOW
 # ============================================================
@@ -383,6 +409,15 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
         lbl.pack(side="left", padx=(0, 8))
         lbl._img = _top_logo[0]
 
+    icon_dir = os.path.join(os.path.dirname(__file__), "icon")
+    _form_icons = {}
+    def load_icon_image(filename, size=18):
+        path = os.path.join(icon_dir, filename)
+        icon_img = load_png_image(path, size)
+        if icon_img:
+            _form_icons[filename] = icon_img
+        return icon_img
+
     title_frame = tk.Frame(left_top, bg=C_RED_DARK)
     title_frame.pack(side="left", fill="y")
     tk.Label(title_frame, text="BARANGAY SAN ANDRES",
@@ -419,7 +454,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     tk.Frame(main_frame, bg=C_GOLD, height=3).pack(fill="x")
 
     # ── SCROLLABLE CONTENT AREA ───────────────────────────────
-    content_canvas = tk.Canvas(main_frame, bg="#1A0A0A", highlightthickness=0)
+    content_canvas = tk.Canvas(main_frame, bg=C_OFF_WHITE, highlightthickness=0)
     vsb = ttk.Scrollbar(main_frame, orient="vertical", command=content_canvas.yview)
     content_canvas.configure(yscrollcommand=vsb.set)
     vsb.pack(side="right", fill="y")
@@ -445,28 +480,18 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             left = (nw - w) // 2
             top = max(0, (nh - h) // 2)
             img = img.crop((left, top, left + w, top + h))
-            rgb = ImageEnhance.Brightness(img.convert("RGB")).enhance(0.28)
-            overlay = Image.new("RGBA", (w, h), (110, 0, 0, 100))
-            result = Image.blend(rgb.convert("RGBA"), overlay, alpha=0.45)
-            photo = ImageTk.PhotoImage(result)
+            rgb = ImageEnhance.Brightness(img.convert("RGB")).enhance(0.55)
+            photo = ImageTk.PhotoImage(rgb)
             _bg_ref[0] = photo
             content_canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg_layer")
             content_canvas.tag_lower("bg_layer")
         except Exception:
-            content_canvas.configure(bg="#1A0A0A")
+            content_canvas.configure(bg=C_OFF_WHITE)
 
-    # Inner frame
-    inner = tk.Frame(content_canvas, bg=C_OFF_WHITE)
-    inner_id = content_canvas.create_window(0, 0, anchor="nw", window=inner)
-
-    def _on_inner_configure(e):
-        content_canvas.configure(scrollregion=content_canvas.bbox("all"))
 
     def _on_canvas_configure(e):
-        content_canvas.itemconfig(inner_id, width=e.width)
         _draw_bg()
 
-    inner.bind("<Configure>", _on_inner_configure)
     content_canvas.bind("<Configure>", _on_canvas_configure)
     content_canvas.after(150, _draw_bg)
 
@@ -475,15 +500,51 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
         content_canvas.yview_scroll(int(-1*(e.delta/120)), "units")
     content_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-    # ── CARD ─────────────────────────────────────────────────
-    card_wrapper = tk.Frame(inner, bg=C_OFF_WHITE, width=500, height=650)
-    card_wrapper.pack(padx=40, pady=30)
-    card_wrapper.pack_propagate(False)
+    # ── CARD — draw rounded rect directly on content_canvas for true transparent corners ──
+    CARD_W = 500
+    CARD_H = 570
+    CARD_RADIUS = 24
 
-    card = tk.Frame(card_wrapper, bg=C_WHITE,
-                    highlightbackground=C_BORDER,
-                    highlightthickness=1)
-    card.pack(fill="both", expand=True)
+    _card_rect_id = [None]
+    def _draw_card_rect(x, y):
+        if _card_rect_id[0]:
+            content_canvas.delete(_card_rect_id[0])
+        x2, y2 = x + CARD_W, y + CARD_H
+        r = CARD_RADIUS
+        points = [
+            x+r, y,  x2-r, y,
+            x2, y,   x2, y+r,
+            x2, y2-r, x2, y2,
+            x2-r, y2, x+r, y2,
+            x, y2,   x, y2-r,
+            x, y+r,  x, y,
+        ]
+        _card_rect_id[0] = content_canvas.create_polygon(
+            points, smooth=True,
+            fill=C_WHITE, outline=C_BORDER, width=1,
+            tags="card_bg"
+        )
+        content_canvas.tag_lower("card_bg", "card_window")
+
+    card = tk.Frame(content_canvas, bg=C_WHITE)
+    card_id = content_canvas.create_window(0, 0, anchor="nw", window=card,
+                                           width=CARD_W, height=CARD_H,
+                                           tags="card_window")
+
+    def _center_card(e=None):
+        cw = content_canvas.winfo_width()
+        ch = content_canvas.winfo_height()
+        x = max(0, (cw - CARD_W) // 2)
+        y = max(20, (ch - CARD_H) // 2)
+        content_canvas.coords(card_id, x, y)
+        content_canvas.itemconfig(card_id, width=CARD_W, height=CARD_H)
+        _draw_card_rect(x, y)
+        scroll_h = max(ch, CARD_H + y * 2)
+        content_canvas.configure(scrollregion=(0, 0, cw, scroll_h))
+        content_canvas.tag_lower("bg_layer")
+
+    content_canvas.bind("<Configure>", lambda e: [_on_canvas_configure(e), _center_card(e)])
+    content_canvas.after(200, _center_card)
 
     # Red top accent
     tk.Frame(card, bg=C_RED_ACCENT, height=6).pack(fill="x")
@@ -508,7 +569,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             except Exception:
                 return None
 
-    logo1 = _load_logo(os.path.join(logo_dir, "logo.png"), 150)
+    logo1 = _load_logo(os.path.join(logo_dir, "logo.png"), 112)
     logo2 = _load_logo(os.path.join(logo_dir, "sk.png"), 90)
     _card_logos[0], _card_logos[1] = logo1, logo2
 
@@ -590,9 +651,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     name_frame = tk.Frame(row1, bg=C_WHITE)
     name_frame.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
-    tk.Label(name_frame, text="👤  FULL NAME *",
+    name_label_frame = tk.Frame(name_frame, bg=C_WHITE)
+    name_label_frame.pack(fill="x", pady=(0, 5))
+    name_icon = load_icon_image("user.png", 18)
+    if name_icon:
+        name_icon_lbl = tk.Label(name_label_frame, image=name_icon, bg=C_WHITE)
+        name_icon_lbl._img = name_icon
+        name_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(name_label_frame, text="FULL NAME *",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
     name_container = tk.Frame(name_frame, bg=C_INPUT_BG,
                                highlightbackground=C_BORDER,
                                highlightcolor=C_RED_ACCENT,
@@ -606,9 +674,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     contact_frame = tk.Frame(row1, bg=C_WHITE)
     contact_frame.pack(side="left", fill="x", expand=True)
 
-    tk.Label(contact_frame, text="📞  CONTACT NUMBER *",
+    contact_label_frame = tk.Frame(contact_frame, bg=C_WHITE)
+    contact_label_frame.pack(fill="x", pady=(0, 5))
+    contact_icon = load_icon_image("telephone-handle-silhouette.png", 18)
+    if contact_icon:
+        contact_icon_lbl = tk.Label(contact_label_frame, image=contact_icon, bg=C_WHITE)
+        contact_icon_lbl._img = contact_icon
+        contact_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(contact_label_frame, text="CONTACT NUMBER *",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
     contact_container = tk.Frame(contact_frame, bg=C_INPUT_BG,
                                   highlightbackground=C_BORDER,
                                   highlightcolor=C_RED_ACCENT,
@@ -623,9 +698,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     row2 = tk.Frame(form_outer, bg=C_WHITE)
     row2.pack(fill="x", pady=(0, 16))
 
-    tk.Label(row2, text="🏠  ADDRESS *",
+    address_label_frame = tk.Frame(row2, bg=C_WHITE)
+    address_label_frame.pack(fill="x", pady=(0, 5))
+    address_icon = load_icon_image("home.png", 18)
+    if address_icon:
+        address_icon_lbl = tk.Label(address_label_frame, image=address_icon, bg=C_WHITE)
+        address_icon_lbl._img = address_icon
+        address_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(address_label_frame, text="ADDRESS *",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
     addr_container = tk.Frame(row2, bg=C_INPUT_BG,
                                highlightbackground=C_BORDER,
                                highlightcolor=C_RED_ACCENT,
@@ -643,9 +725,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     purpose_frame = tk.Frame(row3, bg=C_WHITE)
     purpose_frame.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
-    tk.Label(purpose_frame, text="🎯  PURPOSE OF VISIT *",
+    purpose_label_frame = tk.Frame(purpose_frame, bg=C_WHITE)
+    purpose_label_frame.pack(fill="x", pady=(0, 5))
+    purpose_icon = load_icon_image("target.png", 18)
+    if purpose_icon:
+        purpose_icon_lbl = tk.Label(purpose_label_frame, image=purpose_icon, bg=C_WHITE)
+        purpose_icon_lbl._img = purpose_icon
+        purpose_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(purpose_label_frame, text="PURPOSE OF VISIT *",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
 
     style = ttk.Style()
     style.theme_use("clam")
@@ -675,9 +764,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     date_frame = tk.Frame(row3, bg=C_WHITE)
     date_frame.pack(side="left", fill="x", expand=True)
 
-    tk.Label(date_frame, text="📅  VISIT DATE *",
+    date_label_frame = tk.Frame(date_frame, bg=C_WHITE)
+    date_label_frame.pack(fill="x", pady=(0, 5))
+    date_icon = load_icon_image("calendar.png", 18)
+    if date_icon:
+        date_icon_lbl = tk.Label(date_label_frame, image=date_icon, bg=C_WHITE)
+        date_icon_lbl._img = date_icon
+        date_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(date_label_frame, text="VISIT DATE *",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
     date_container = tk.Frame(date_frame, bg=C_INPUT_BG,
                                highlightbackground=C_BORDER,
                                highlightcolor=C_RED_ACCENT,
@@ -712,9 +808,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     time_frame = tk.Frame(row5, bg=C_WHITE)
     time_frame.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
-    tk.Label(time_frame, text="🕐  VISIT TIME *",
+    time_label_frame = tk.Frame(time_frame, bg=C_WHITE)
+    time_label_frame.pack(fill="x", pady=(0, 5))
+    time_icon = load_icon_image("clock.png", 18)
+    if time_icon:
+        time_icon_lbl = tk.Label(time_label_frame, image=time_icon, bg=C_WHITE)
+        time_icon_lbl._img = time_icon
+        time_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(time_label_frame, text="VISIT TIME *",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
     time_container = tk.Frame(time_frame, bg=C_INPUT_BG,
                                highlightbackground=C_BORDER,
                                highlightcolor=C_RED_ACCENT,
@@ -729,9 +832,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     person_frame = tk.Frame(row5, bg=C_WHITE)
     person_frame.pack(side="left", fill="x", expand=True)
 
-    tk.Label(person_frame, text="👤  PERSON TO SEE (Optional)",
+    person_label_frame = tk.Frame(person_frame, bg=C_WHITE)
+    person_label_frame.pack(fill="x", pady=(0, 5))
+    person_icon = load_icon_image("user.png", 18)
+    if person_icon:
+        person_icon_lbl = tk.Label(person_label_frame, image=person_icon, bg=C_WHITE)
+        person_icon_lbl._img = person_icon
+        person_icon_lbl.pack(side="left", padx=(0, 4))
+    tk.Label(person_label_frame, text="PERSON TO SEE (Optional)",
              font=("Segoe UI", 8, "bold"),
-             bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
+             bg=C_WHITE, fg=C_LABEL).pack(side="left")
     person_container = tk.Frame(person_frame, bg=C_INPUT_BG,
                                  highlightbackground=C_BORDER,
                                  highlightcolor=C_RED_ACCENT,
