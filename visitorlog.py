@@ -231,6 +231,24 @@ def create_rounded_card_container(parent, width, height, bg, fill, outline, radi
                          highlightthickness=1)
         return frame, frame
 
+
+def load_icon_image_file(filename, size=18):
+    icon_dir = os.path.join(os.path.dirname(__file__), "icon")
+    path = os.path.join(icon_dir, filename)
+    if not os.path.exists(path):
+        return None
+    try:
+        from PIL import Image, ImageTk
+        img = Image.open(path)
+        if size:
+            img = img.resize((size, size), Image.LANCZOS)
+        return ImageTk.PhotoImage(img)
+    except Exception:
+        try:
+            return tk.PhotoImage(file=path)
+        except Exception:
+            return None
+
 # ============================================================
 #  LOGIN WINDOW
 # ============================================================
@@ -412,8 +430,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     icon_dir = os.path.join(os.path.dirname(__file__), "icon")
     _form_icons = {}
     def load_icon_image(filename, size=18):
-        path = os.path.join(icon_dir, filename)
-        icon_img = load_png_image(path, size)
+        icon_img = load_icon_image_file(filename, size)
         if icon_img:
             _form_icons[filename] = icon_img
         return icon_img
@@ -440,12 +457,16 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
              bg=C_RED_DARK, fg=C_TEXT_LIGHT).pack()
 
     # Admin login button
-    admin_btn = tk.Button(topbar, text="👤  Admin Login",
+    admin_icon = load_icon_image("user.png", 18)
+    admin_btn = tk.Button(topbar, text="Admin Login",
+                          image=admin_icon, compound="left",
                           font=("Segoe UI", 9, "bold"),
                           bg=C_RED_MID, fg=C_WHITE,
                           activebackground=C_RED_ACCENT, activeforeground=C_WHITE,
                           relief="flat", cursor="hand2", padx=16,
                           command=lambda: try_admin_login(root, main_frame, sidebar_nav))
+    if admin_icon:
+        admin_btn._img = admin_icon
     admin_btn.pack(side="right", padx=14, pady=10)
     admin_btn.bind("<Enter>", lambda e: admin_btn.config(bg=C_RED_ACCENT))
     admin_btn.bind("<Leave>", lambda e: admin_btn.config(bg=C_RED_MID))
@@ -502,14 +523,14 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
 
     # ── CARD — draw rounded rect directly on content_canvas for true transparent corners ──
     CARD_W = 500
-    CARD_H = 570
+    CARD_MIN_H = 570
     CARD_RADIUS = 24
 
     _card_rect_id = [None]
-    def _draw_card_rect(x, y):
+    def _draw_card_rect(x, y, height):
         if _card_rect_id[0]:
             content_canvas.delete(_card_rect_id[0])
-        x2, y2 = x + CARD_W, y + CARD_H
+        x2, y2 = x + CARD_W, y + height
         r = CARD_RADIUS
         points = [
             x+r, y,  x2-r, y,
@@ -528,18 +549,20 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
 
     card = tk.Frame(content_canvas, bg=C_WHITE)
     card_id = content_canvas.create_window(0, 0, anchor="nw", window=card,
-                                           width=CARD_W, height=CARD_H,
+                                           width=CARD_W,
                                            tags="card_window")
 
     def _center_card(e=None):
+        content_canvas.update_idletasks()
+        card_h = max(CARD_MIN_H, card.winfo_reqheight())
         cw = content_canvas.winfo_width()
         ch = content_canvas.winfo_height()
         x = max(0, (cw - CARD_W) // 2)
-        y = max(20, (ch - CARD_H) // 2)
+        y = max(20, (ch - card_h) // 2)
         content_canvas.coords(card_id, x, y)
-        content_canvas.itemconfig(card_id, width=CARD_W, height=CARD_H)
-        _draw_card_rect(x, y)
-        scroll_h = max(ch, CARD_H + y * 2)
+        content_canvas.itemconfig(card_id, width=CARD_W, height=card_h)
+        _draw_card_rect(x, y, card_h)
+        scroll_h = max(ch, card_h + y * 2)
         content_canvas.configure(scrollregion=(0, 0, cw, scroll_h))
         content_canvas.tag_lower("bg_layer")
 
@@ -795,11 +818,14 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     date_entry.pack(fill="x", ipady=9, padx=12)
 
     # Row 4: "Other" purpose field (hidden by default)
-    other_row = tk.Frame(form_outer, bg=C_WHITE)
-    tk.Label(other_row, text="✏  PLEASE SPECIFY PURPOSE *",
+    other_row = tk.Frame(form_outer, bg=C_WHITE, height=0)
+    other_row.pack_propagate(False)
+    other_inner = tk.Frame(other_row, bg=C_WHITE)
+    other_inner.pack(fill="both", expand=True)
+    tk.Label(other_inner, text="✏  PLEASE SPECIFY PURPOSE *",
              font=("Segoe UI", 8, "bold"),
              bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 5))
-    other_container = tk.Frame(other_row, bg=C_INPUT_BG,
+    other_container = tk.Frame(other_inner, bg=C_INPUT_BG,
                                 highlightbackground=C_BORDER,
                                 highlightcolor=C_RED_ACCENT,
                                 highlightthickness=1)
@@ -809,6 +835,40 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
                             insertbackground=C_RED_ACCENT, relief="flat", bd=0)
     other_entry.pack(fill="x", ipady=9, padx=12)
     other_row.pack_forget()
+    other_anim_job = [None]
+
+    def _cancel_other_animation():
+        if other_anim_job[0] is not None:
+            other_row.after_cancel(other_anim_job[0])
+            other_anim_job[0] = None
+
+    def _animate_other(show, current_height=None):
+        _cancel_other_animation()
+        target = 88
+        step = 12
+        if current_height is None:
+            current_height = other_row.winfo_height()
+        if show:
+            if current_height >= target:
+                other_row.configure(height=target)
+                other_anim_job[0] = None
+                _center_card()
+                return
+            next_height = min(target, current_height + step)
+            other_row.configure(height=next_height)
+            _center_card()
+            other_anim_job[0] = other_row.after(10, lambda: _animate_other(True, next_height))
+        else:
+            if current_height <= 0:
+                other_row.pack_forget()
+                other_row.configure(height=0)
+                other_anim_job[0] = None
+                _center_card()
+                return
+            next_height = max(0, current_height - step)
+            other_row.configure(height=next_height)
+            _center_card()
+            other_anim_job[0] = other_row.after(10, lambda: _animate_other(False, next_height))
 
     # Row 5: Time + Person to see
     row5 = tk.Frame(form_outer, bg=C_WHITE)
@@ -863,10 +923,12 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
 
     def _toggle_other(*_):
         if purpose_var.get() == "Other":
-            other_row.pack(fill="x", pady=(0, 16), before=row5)
+            if not other_row.winfo_ismapped():
+                other_row.pack(fill="x", pady=(0, 16), before=row5)
+            _animate_other(True)
         else:
             other_purpose_var.set("")
-            other_row.pack_forget()
+            _animate_other(False)
 
     purpose_var.trace_add("write", _toggle_other)
 
@@ -1327,12 +1389,6 @@ def show_settings_screen(root, main_frame, sidebar_nav=None):
                  title="Appearance",
                  subtitle="Current display settings for this application.")
 
-    row = tk.Frame(ap, bg=DK_SURFACE)
-    row.pack(fill="x", pady=4)
-    tk.Label(row, text="🌙  Theme", font=("Segoe UI", 9, "bold"),
-             bg=DK_SURFACE, fg=DK_MUTED, width=18, anchor="w").pack(side="left")
-    tk.Label(row, text="Dark Mode  (Settings Panel)", font=("Segoe UI", 9),
-             bg=DK_SURFACE, fg=DK_TEXT).pack(side="left")
 
     row2 = tk.Frame(ap, bg=DK_SURFACE)
     row2.pack(fill="x", pady=4)
@@ -1441,9 +1497,15 @@ def main():
                 if isinstance(w, tk.Frame) and w != inner:
                     w.config(bg=C_GOLD if is_active else C_SIDEBAR_BG)
 
+    nav_icon_images = {
+        "visitor_entry": load_icon_image_file("user.png", 16),
+        "visitor_log": load_icon_image_file("bullet.png", 16),
+        "settings": load_icon_image_file("settings.png", 16),
+    }
+
     nav_items = [
-        ("visitor_entry", "📝", "Visitor Entry"),
-        ("visitor_log", "☰", "Visitor Log"),
+        ("visitor_entry", "👤", "Visitor Entry"),
+        ("visitor_log", "•", "Visitor Log"),
         ("settings", "⚙", "Settings"),
     ]
 
@@ -1461,8 +1523,13 @@ def main():
         inner = tk.Frame(frame, bg=bg)
         inner.pack(side="left", fill="x", expand=True, padx=10, pady=10)
 
-        icon_lbl = tk.Label(inner, text=icon, font=("Segoe UI", 11),
-                            bg=bg, fg=C_WHITE)
+        icon_img = nav_icon_images.get(key)
+        if icon_img:
+            icon_lbl = tk.Label(inner, image=icon_img, bg=bg)
+            icon_lbl._img = icon_img
+        else:
+            icon_lbl = tk.Label(inner, text=icon, font=("Segoe UI", 11),
+                                bg=bg, fg=C_WHITE)
         icon_lbl.pack(side="left")
         text_lbl = tk.Label(inner, text=f"  {text}",
                             font=("Segoe UI", 10, "bold" if is_active else "normal"),
