@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, font as tkfont
 import sqlite3
 from datetime import datetime
 import re
@@ -232,6 +232,44 @@ def create_rounded_card_container(parent, width, height, bg, fill, outline, radi
         return frame, frame
 
 
+def configure_button_styles():
+    style = ttk.Style()
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    style.configure("RoundedAccent.TButton",
+                    font=("Segoe UI", 10, "bold"),
+                    foreground=C_WHITE,
+                    background=C_RED_ACCENT,
+                    borderwidth=0,
+                    focusthickness=0,
+                    focuscolor="",
+                    padding=(14, 8))
+    style.map("RoundedAccent.TButton",
+              background=[("active", C_RED_DARK), ("disabled", C_RED_MID)])
+    style.configure("RoundedMid.TButton",
+                    font=("Segoe UI", 10, "bold"),
+                    foreground=C_WHITE,
+                    background=C_RED_MID,
+                    borderwidth=0,
+                    focusthickness=0,
+                    focuscolor="",
+                    padding=(12, 8))
+    style.map("RoundedMid.TButton",
+              background=[("active", C_RED_ACCENT), ("disabled", C_RED_MID)])
+    style.configure("RoundedGreen.TButton",
+                    font=("Segoe UI", 10, "bold"),
+                    foreground=C_WHITE,
+                    background=C_GREEN,
+                    borderwidth=0,
+                    focusthickness=0,
+                    focuscolor="",
+                    padding=(12, 8))
+    style.map("RoundedGreen.TButton",
+              background=[("active", "#005522"), ("disabled", "#006633")])
+
+
 def load_icon_image_file(filename, size=18):
     icon_dir = os.path.join(os.path.dirname(__file__), "icon")
     path = os.path.join(icon_dir, filename)
@@ -248,6 +286,121 @@ def load_icon_image_file(filename, size=18):
             return tk.PhotoImage(file=path)
         except Exception:
             return None
+
+
+class RoundedButton(tk.Canvas):
+    def __init__(self, parent, text="", icon=None, compound="left",
+                 fg=C_WHITE, bg=C_RED_ACCENT, activebackground=C_RED_DARK,
+                 font=("Segoe UI", 10, "bold"), command=None,
+                 radius=16, padding=(18, 10), min_width=0, cursor="hand2", **kwargs):
+        parent_bg = parent["bg"] if "bg" in parent.keys() else C_OFF_WHITE
+        self.text = text
+        self.icon = icon
+        self.compound = compound
+        self.fg = fg
+        self.bg_color = bg
+        self.active_bg = activebackground
+        self.font = font
+        self.command = command
+        self.radius = radius
+        self.padding_x, self.padding_y = padding
+        self.min_width = min_width
+        self._hover = False
+        self._bg_image = None
+        self._icon_ref = icon
+        self._font = tkfont.Font(font=self.font)
+
+        width = max(self._estimate_width(), self.min_width)
+        height = max(self._estimate_height(), 36)
+        super().__init__(parent, width=width, height=height,
+                         bg=parent_bg, highlightthickness=0,
+                         bd=0, cursor=cursor, **kwargs)
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Configure>", self._on_configure)
+
+        self._draw_button()
+
+    def _estimate_width(self):
+        text_width = self._font.measure(self.text)
+        icon_width = self.icon.width() if self.icon else 0
+        spacing = 8 if self.icon else 0
+        return self.padding_x * 2 + text_width + icon_width + spacing
+
+    def _estimate_height(self):
+        text_height = self._font.metrics("linespace")
+        icon_height = self.icon.height() if self.icon else 0
+        return max(text_height, icon_height) + self.padding_y * 2
+
+    def _create_rounded_image(self, width, height, color):
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.rounded_rectangle((0, 0, width, height), radius=self.radius,
+                                   fill=color)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    def _draw_button(self):
+        self.delete("all")
+        width = max(self.winfo_width(), self._estimate_width(), self.min_width)
+        height = max(self.winfo_height(), self._estimate_height())
+        tk.Canvas.config(self, width=width, height=height)
+
+        bg_color = self.active_bg if self._hover else self.bg_color
+        self._bg_image = self._create_rounded_image(width, height, bg_color)
+        if self._bg_image:
+            self.create_image(0, 0, image=self._bg_image, anchor="nw")
+
+        center_y = height // 2
+        if self.icon and self.compound == "left":
+            text_width = self._font.measure(self.text)
+            icon_width = self.icon.width()
+            total_width = icon_width + 8 + text_width
+            content_x = max(self.padding_x, (width - total_width) // 2)
+            self.create_image(content_x, center_y, image=self.icon, anchor="w")
+            content_x += icon_width + 8
+            self.create_text(content_x, center_y, text=self.text,
+                             anchor="w", fill=self.fg, font=self.font)
+        else:
+            self.create_text(width // 2, center_y, text=self.text,
+                             anchor="center", fill=self.fg, font=self.font)
+
+    def _on_enter(self, event=None):
+        self._hover = True
+        self._draw_button()
+
+    def _on_leave(self, event=None):
+        self._hover = False
+        self._draw_button()
+
+    def _on_click(self, event=None):
+        if callable(self.command):
+            self.command()
+
+    def config(self, **kwargs):
+        if "command" in kwargs:
+            self.command = kwargs.pop("command")
+        if "text" in kwargs:
+            self.text = kwargs.pop("text")
+        if "icon" in kwargs:
+            self.icon = kwargs.pop("icon")
+            self._icon_ref = self.icon
+        if kwargs:
+            super().config(**kwargs)
+        self._draw_button()
+        return self
+
+    configure = config
+
+    def _on_configure(self, event):
+        if event.width != self.winfo_width() or event.height != self.winfo_height():
+            self._draw_button()
+
 
 # ============================================================
 #  LOGIN WINDOW
@@ -318,18 +471,97 @@ def open_login_window(parent=None):
             messagebox.showerror("Wrong Password", "Incorrect password. Try again.", parent=login)
             password_var.set("")
 
-    btn = tk.Button(body, text="LOGIN",
-                    font=("Segoe UI", 10, "bold"),
-                    bg=C_RED_ACCENT, fg=C_WHITE,
-                    activebackground=C_RED_DARK, activeforeground=C_WHITE,
-                    relief="flat", cursor="hand2",
-                    command=check_password)
-    btn.pack(fill="x", pady=(16, 0), ipady=9)
-    btn.bind("<Enter>", lambda e: btn.config(bg=C_RED_DARK))
-    btn.bind("<Leave>", lambda e: btn.config(bg=C_RED_ACCENT))
+    btn = RoundedButton(body, text="LOGIN",
+                         bg=C_RED_ACCENT,
+                         activebackground=C_RED_DARK,
+                         min_width=260,
+                         command=check_password)
+    btn.pack(pady=(16, 0), anchor="center")
 
     entry.bind("<Return>", lambda e: check_password())
     login.wait_window()
+    return result["success"]
+
+
+def open_change_password_window(parent=None):
+    dialog = tk.Toplevel(parent)
+    dialog.title("Change Admin Password")
+    width, height = 420, 360
+    dialog.geometry(f"{width}x{height}")
+    dialog.resizable(False, False)
+    dialog.configure(bg=C_WHITE)
+    dialog.update_idletasks()
+    try:
+        if parent:
+            x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        else:
+            x = (dialog.winfo_screenwidth() - width) // 2
+            y = (dialog.winfo_screenheight() - height) // 2
+    except Exception:
+        x, y = 100, 100
+    dialog.geometry(f"{width}x{height}+{x}+{y}")
+    dialog.grab_set()
+
+    top = tk.Frame(dialog, bg=C_RED_ACCENT, height=8)
+    top.pack(fill="x")
+
+    header = tk.Frame(dialog, bg=C_RED_DARK)
+    header.pack(fill="x", pady=(0, 8))
+    lock_icon = load_icon_image_file("lock.png", 24)
+    if lock_icon:
+        icon_lbl = tk.Label(header, image=lock_icon, bg=C_RED_DARK)
+        icon_lbl._img = lock_icon
+        icon_lbl.pack(side="left", padx=(20, 8), pady=12)
+    tk.Label(header, text="Change Admin Password",
+             font=("Georgia", 13, "bold"),
+             bg=C_RED_DARK, fg=C_WHITE, pady=16).pack(side="left", padx=(0, 16))
+
+    body = tk.Frame(dialog, bg=C_WHITE, padx=30, pady=20)
+    body.pack(fill="both", expand=True)
+
+    current_var = tk.StringVar()
+    new_var = tk.StringVar()
+
+    for label_text, var in [("Current Password", current_var), ("New Password", new_var)]:
+        lbl = tk.Label(body, text=label_text,
+                       font=("Segoe UI", 9, "bold"),
+                       bg=C_WHITE, fg=C_LABEL)
+        lbl.pack(anchor="w", pady=(0, 6))
+        cont = tk.Frame(body, bg=C_INPUT_BG,
+                        highlightbackground=C_BORDER, highlightthickness=1)
+        cont.pack(fill="x", pady=(0, 14))
+        ent = tk.Entry(cont, textvariable=var, show="●",
+                       font=("Segoe UI", 10), bg=C_INPUT_BG, fg=C_TEXT_DARK,
+                       insertbackground=C_RED_ACCENT, relief="flat", bd=0)
+        ent.pack(fill="x", ipady=8, padx=10)
+        ent.bind("<FocusIn>", lambda e, c=cont: c.config(highlightbackground=C_RED_ACCENT, highlightthickness=2))
+        ent.bind("<FocusOut>", lambda e, c=cont: c.config(highlightbackground=C_BORDER, highlightthickness=1))
+
+    result = {"success": False}
+
+    def save_new_password():
+        if current_var.get() != get_admin_password():
+            messagebox.showerror("Error", "Current password is incorrect.", parent=dialog)
+            return
+        if len(new_var.get()) < 4:
+            messagebox.showerror("Error", "New password must be at least 4 characters.", parent=dialog)
+            return
+        if save_admin_password(new_var.get()):
+            messagebox.showinfo("Success", "Password updated successfully.", parent=dialog)
+            result["success"] = True
+            dialog.destroy()
+        else:
+            messagebox.showerror("Error", "Failed to save new password.", parent=dialog)
+
+    btn = RoundedButton(body, text="Update Password",
+                         bg=C_RED_ACCENT,
+                         activebackground=C_RED_DARK,
+                         command=save_new_password)
+    btn.pack(pady=(10, 0), anchor="center")
+
+    dialog.bind("<Return>", lambda e: save_new_password())
+    dialog.wait_window()
     return result["success"]
 
 # ============================================================
@@ -458,18 +690,15 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
 
     # Admin login button
     admin_icon = load_icon_image("user.png", 18)
-    admin_btn = tk.Button(topbar, text="Admin Login",
-                          image=admin_icon, compound="left",
-                          font=("Segoe UI", 9, "bold"),
-                          bg=C_RED_MID, fg=C_WHITE,
-                          activebackground=C_RED_ACCENT, activeforeground=C_WHITE,
-                          relief="flat", cursor="hand2", padx=16,
-                          command=lambda: try_admin_login(root, main_frame, sidebar_nav))
+    admin_btn = RoundedButton(topbar, text="Admin Login",
+                               icon=admin_icon, compound="left",
+                               bg=C_RED_MID,
+                               activebackground=C_RED_ACCENT,
+                               min_width=220,
+                               command=lambda: try_admin_login(root, main_frame, sidebar_nav))
     if admin_icon:
-        admin_btn._img = admin_icon
-    admin_btn.pack(side="right", padx=14, pady=10)
-    admin_btn.bind("<Enter>", lambda e: admin_btn.config(bg=C_RED_ACCENT))
-    admin_btn.bind("<Leave>", lambda e: admin_btn.config(bg=C_RED_MID))
+        admin_btn._icon_ref = admin_icon
+    admin_btn.pack(side="right", padx=14, pady=8)
 
     # Gold accent line
     tk.Frame(main_frame, bg=C_GOLD, height=3).pack(fill="x")
@@ -952,14 +1181,15 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     btn_frame = tk.Frame(card, bg=C_WHITE, padx=30)
     btn_frame.pack(fill="x", pady=(4, 0))
 
-    submit_btn = tk.Button(btn_frame, text="✈   REGISTER VISIT",
-                           font=("Segoe UI", 12, "bold"),
-                           bg=C_RED_ACCENT, fg=C_WHITE,
-                           activebackground=C_RED_DARK, activeforeground=C_WHITE,
-                           relief="flat", cursor="hand2")
-    submit_btn.pack(fill="x", ipady=13)
-    submit_btn.bind("<Enter>", lambda e: submit_btn.config(bg=C_RED_DARK))
-    submit_btn.bind("<Leave>", lambda e: submit_btn.config(bg=C_RED_ACCENT))
+    submit_icon = load_icon_image("paper-plane.png", 18)
+    submit_btn = RoundedButton(btn_frame, text="REGISTER VISIT",
+                               icon=submit_icon, compound="left",
+                               bg=C_RED_ACCENT,
+                               activebackground=C_RED_DARK,
+                               min_width=300)
+    if submit_icon:
+        submit_btn._icon_ref = submit_icon
+    submit_btn.pack(pady=(8, 0), anchor="center")
 
     # Security notice
     notice_frame = tk.Frame(card, bg=C_WHITE)
@@ -1032,15 +1262,16 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     topbar.pack(fill="x")
     topbar.pack_propagate(False)
 
-    back_btn = tk.Button(topbar, text="← Back to Visitor Entry",
-                         font=("Segoe UI", 9, "bold"),
-                         bg=C_RED_MID, fg=C_WHITE,
-                         activebackground=C_RED_ACCENT,
-                         relief="flat", cursor="hand2", padx=14,
-                         command=lambda: show_user_screen(root, main_frame, sidebar_nav))
-    back_btn.pack(side="right", padx=14, pady=11)
-    back_btn.bind("<Enter>", lambda e: back_btn.config(bg=C_RED_ACCENT))
-    back_btn.bind("<Leave>", lambda e: back_btn.config(bg=C_RED_MID))
+    back_icon = load_icon_image_file("back.png", 16)
+    back_btn = RoundedButton(topbar, text="Back to Visitor Entry",
+                             icon=back_icon, compound="left",
+                             bg=C_RED_MID,
+                             activebackground=C_RED_ACCENT,
+                             min_width=260,
+                             command=lambda: show_user_screen(root, main_frame, sidebar_nav))
+    if back_icon:
+        back_btn._icon_ref = back_icon
+    back_btn.pack(side="right", padx=14, pady=8)
 
     tk.Label(topbar, text="  🛡  ADMIN PANEL  —  Visitor Records",
              font=("Georgia", 12, "bold"),
@@ -1181,10 +1412,10 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         except Exception as err:
             messagebox.showerror("Error", str(err))
 
-    dl_btn = tk.Button(action_group, text="⬇  Export Records",
-                       bg=C_GREEN, fg=C_WHITE, font=("Segoe UI", 9, "bold"),
-                       relief="flat", cursor="hand2", padx=12, pady=6,
-                       command=export_records)
+    dl_btn = RoundedButton(action_group, text="⬇  Export Records",
+                            bg=C_GREEN,
+                            activebackground="#005522",
+                            command=export_records)
     dl_btn.pack(side="left", padx=4)
 
     # ── TABLE ────────────────────────────────────────────────
@@ -1246,7 +1477,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     search_var.trace("w", lambda *_: load_table())
     load_table()
 
-    # ── CHANGE PASSWORD CARD (inline in admin) ────────────────
+    # ── CHANGE PASSWORD CARD ───────────────────────────────
     pw_section = tk.Frame(main_frame, bg=C_OFF_WHITE)
     pw_section.pack(fill="x", padx=16, pady=(6, 12))
 
@@ -1260,53 +1491,37 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
 
     pw_left = tk.Frame(pw_body, bg=C_WHITE)
     pw_left.pack(side="left", fill="y", padx=(0, 30))
-    tk.Label(pw_left, text="🔑  Change Admin Password",
+    header_row = tk.Frame(pw_left, bg=C_WHITE)
+    header_row.pack(fill="x")
+    lock_label = load_icon_image_file("lock.png", 16)
+    if lock_label:
+        icon_lbl = tk.Label(header_row, image=lock_label, bg=C_WHITE)
+        icon_lbl._img = lock_label
+        icon_lbl.pack(side="left", pady=2)
+    tk.Label(header_row, text="Change Admin Password",
              font=("Georgia", 11, "bold"),
-             bg=C_WHITE, fg=C_RED_DARK).pack(anchor="w")
-    tk.Label(pw_left, text="Update the password required to access this panel.",
-             font=("Segoe UI", 8), bg=C_WHITE, fg=C_TEXT_MID).pack(anchor="w", pady=(4, 0))
+             bg=C_WHITE, fg=C_RED_DARK).pack(side="left", padx=(6, 0), pady=2)
+    instruction_row = tk.Frame(pw_left, bg=C_WHITE)
+    instruction_row.pack(fill="x", pady=(6, 0))
+    tk.Label(instruction_row, text="Click the button below to change the admin password.",
+             font=("Segoe UI", 8), bg=C_WHITE, fg=C_TEXT_MID).pack(side="left", pady=2)
 
     pw_right = tk.Frame(pw_body, bg=C_WHITE)
     pw_right.pack(side="left", fill="x", expand=True)
 
-    pw_cur_var = tk.StringVar()
-    pw_new_var = tk.StringVar()
+    def open_pw_dialog():
+        open_change_password_window(root)
 
-    fields_row = tk.Frame(pw_right, bg=C_WHITE)
-    fields_row.pack(fill="x")
-
-    for label_text, var in [("Current Password", pw_cur_var), ("New Password", pw_new_var)]:
-        fld = tk.Frame(fields_row, bg=C_WHITE)
-        fld.pack(side="left", fill="x", expand=True, padx=(0, 12))
-        tk.Label(fld, text=label_text, font=("Segoe UI", 8, "bold"),
-                 bg=C_WHITE, fg=C_LABEL).pack(anchor="w", pady=(0, 4))
-        cont = tk.Frame(fld, bg=C_INPUT_BG,
-                        highlightbackground=C_BORDER, highlightthickness=1)
-        cont.pack(fill="x")
-        ent = tk.Entry(cont, textvariable=var, show="●",
-                       font=("Segoe UI", 10), bg=C_INPUT_BG, fg=C_TEXT_DARK,
-                       insertbackground=C_RED_ACCENT, relief="flat", bd=0)
-        ent.pack(fill="x", ipady=7, padx=10)
-        ent.bind("<FocusIn>",  lambda e, c=cont: c.config(highlightbackground=C_RED_ACCENT, highlightthickness=2))
-        ent.bind("<FocusOut>", lambda e, c=cont: c.config(highlightbackground=C_BORDER, highlightthickness=1))
-
-    def do_pw_change():
-        if pw_cur_var.get() != get_admin_password():
-            messagebox.showerror("Error", "Current password is incorrect."); return
-        if len(pw_new_var.get()) < 4:
-            messagebox.showerror("Error", "New password must be at least 4 characters."); return
-        if save_admin_password(pw_new_var.get()):
-            messagebox.showinfo("Success", "Password updated successfully.")
-            pw_cur_var.set(""); pw_new_var.set("")
-        else:
-            messagebox.showerror("Error", "Failed to save new password.")
-
-    upd_btn = tk.Button(pw_right, text="Update Password",
-                        bg=C_RED_ACCENT, fg=C_WHITE, font=("Segoe UI", 9, "bold"),
-                        relief="flat", cursor="hand2", command=do_pw_change)
-    upd_btn.pack(anchor="w", pady=(10, 0), ipady=7)
-    upd_btn.bind("<Enter>", lambda e: upd_btn.config(bg=C_RED_DARK))
-    upd_btn.bind("<Leave>", lambda e: upd_btn.config(bg=C_RED_ACCENT))
+    lock_icon = load_icon_image_file("lock.png", 16)
+    upd_btn = RoundedButton(pw_right, text="Change Password",
+                            icon=lock_icon, compound="left",
+                            bg=C_RED_ACCENT,
+                            activebackground=C_RED_DARK,
+                            min_width=240,
+                            command=open_pw_dialog)
+    if lock_icon:
+        upd_btn._icon_ref = lock_icon
+    upd_btn.pack(anchor="w", pady=(8, 0))
 
 
 # ============================================================
@@ -1414,6 +1629,7 @@ def main():
     root.geometry("1100x720")
     root.minsize(900, 560)
     root.configure(bg=C_OFF_WHITE)
+    configure_button_styles()
     try:
         root.state('zoomed')
     except Exception:
@@ -1575,8 +1791,15 @@ def main():
     clock_frame = tk.Frame(sidebar, bg=C_SIDEBAR_BG)
     clock_frame.pack(fill="x", padx=18)
 
-    tk.Label(clock_frame, text="📅", font=("Segoe UI", 9),
-             bg=C_SIDEBAR_BG, fg=C_GOLD).pack(side="left", padx=(0, 6))
+    clock_icon = load_icon_image_file("calendar.png", 16)
+    if clock_icon:
+        icon_lbl = tk.Label(clock_frame, image=clock_icon, bg=C_SIDEBAR_BG)
+        icon_lbl._img = clock_icon
+    else:
+        icon_lbl = tk.Label(clock_frame, text="📅", font=("Segoe UI", 9),
+                            bg=C_SIDEBAR_BG, fg=C_GOLD)
+    icon_lbl.pack(side="left", padx=(0, 6))
+
     clock_lbl = tk.Label(clock_frame, textvariable=clock_var,
                           font=("Segoe UI", 8),
                           bg=C_SIDEBAR_BG, fg=C_TEXT_LIGHT,
