@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime
 import re
 import os
+import sys
 
 # ============================================================
 #  COLOR PALETTE  –  Modern red/white theme matching screenshot
@@ -139,6 +140,15 @@ def get_admin_password():
     except Exception:
         return "admin123"
 
+
+def resource_path(relative_path):
+    """Return absolute path to resource, works for dev and for PyInstaller bundle."""
+    try:
+        base = sys._MEIPASS
+    except Exception:
+        base = os.path.dirname(__file__)
+    return os.path.join(base, relative_path)
+
 def save_admin_password(new_password):
     try:
         with open(ADMIN_PASSWORD_FILE, "w", encoding="utf-8") as f:
@@ -271,8 +281,7 @@ def configure_button_styles():
 
 
 def load_icon_image_file(filename, size=18):
-    icon_dir = os.path.join(os.path.dirname(__file__), "icon")
-    path = os.path.join(icon_dir, filename)
+    path = resource_path(os.path.join("icon", filename))
     if not os.path.exists(path):
         return None
     try:
@@ -633,8 +642,8 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     left_top = tk.Frame(topbar, bg=C_RED_DARK)
     left_top.pack(side="left", padx=14, fill="y")
 
-    logo_dir = os.path.join(os.path.dirname(__file__), "logo")
-    logo_path = os.path.join(logo_dir, "logo.png")
+    logo_dir = resource_path("logo")
+    logo_path = resource_path(os.path.join("logo", "logo.png"))
     _top_logo = [None]
 
     def load_png_image(path, size=None):
@@ -659,7 +668,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
         lbl.pack(side="left", padx=(0, 8))
         lbl._img = _top_logo[0]
 
-    icon_dir = os.path.join(os.path.dirname(__file__), "icon")
+    icon_dir = resource_path("icon")
     _form_icons = {}
     def load_icon_image(filename, size=18):
         icon_img = load_icon_image_file(filename, size)
@@ -712,7 +721,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
 
     # Background image
     _bg_ref = [None]
-    _bg_path = os.path.join(logo_dir, "barangay.png")
+    _bg_path = resource_path(os.path.join("logo", "barangay.png"))
 
     def _draw_bg():
         w = content_canvas.winfo_width()
@@ -1254,6 +1263,49 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     for w in main_frame.winfo_children():
         w.destroy()
 
+    # Inactivity auto-logout (5 minutes)
+    _inactivity_after_id = [None]
+    INACTIVITY_SECONDS = 5 * 60
+
+    def _cancel_inactivity_timer():
+        try:
+            if _inactivity_after_id[0]:
+                root.after_cancel(_inactivity_after_id[0])
+                _inactivity_after_id[0] = None
+        except Exception:
+            _inactivity_after_id[0] = None
+        try:
+            root.unbind_all('<Any-KeyPress>')
+            root.unbind_all('<Motion>')
+            root.unbind_all('<Button>')
+        except Exception:
+            pass
+
+    def _do_inactivity_logout():
+        _cancel_inactivity_timer()
+        try:
+            messagebox.showinfo("Logged Out", "Admin logged out due to inactivity.", parent=root)
+        except Exception:
+            pass
+        show_user_screen(root, main_frame, sidebar_nav)
+
+    def _reset_inactivity_timer(event=None):
+        try:
+            if _inactivity_after_id[0]:
+                root.after_cancel(_inactivity_after_id[0])
+        except Exception:
+            pass
+        _inactivity_after_id[0] = root.after(INACTIVITY_SECONDS * 1000, _do_inactivity_logout)
+
+    def _bind_inactivity_events():
+        root.bind_all('<Any-KeyPress>', _reset_inactivity_timer)
+        root.bind_all('<Motion>', _reset_inactivity_timer)
+        root.bind_all('<Button>', _reset_inactivity_timer)
+
+    # Start listening for activity
+    _bind_inactivity_events()
+    _reset_inactivity_timer()
+
     if sidebar_nav:
         sidebar_nav["update"]("visitor_log")
 
@@ -1263,12 +1315,16 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     topbar.pack_propagate(False)
 
     back_icon = load_icon_image_file("back.png", 16)
+    def _back_to_user():
+        _cancel_inactivity_timer()
+        show_user_screen(root, main_frame, sidebar_nav)
+
     back_btn = RoundedButton(topbar, text="Back to Visitor Entry",
                              icon=back_icon, compound="left",
                              bg=C_RED_MID,
                              activebackground=C_RED_ACCENT,
                              min_width=260,
-                             command=lambda: show_user_screen(root, main_frame, sidebar_nav))
+                             command=_back_to_user)
     if back_icon:
         back_btn._icon_ref = back_icon
     back_btn.pack(side="right", padx=14, pady=8)
