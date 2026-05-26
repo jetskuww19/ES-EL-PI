@@ -1255,9 +1255,501 @@ def try_admin_login(root, main_frame, sidebar_nav=None):
     if open_login_window(root):
         show_admin_screen(root, main_frame, sidebar_nav)
 
+
 # ============================================================
-#  ADMIN SCREEN  –  Modern Visitor Records
+#  ANALYTICS HELPERS
 # ============================================================
+
+def analytics_get_daily_counts(days=30):
+    """Returns list of (date_str, count) for the last `days` days."""
+    from datetime import timedelta
+    conn = sqlite3.connect("barangay_visitors.db")
+    cur = conn.cursor()
+    results = []
+    today = datetime.now().date()
+    for i in range(days - 1, -1, -1):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date=?", (d,))
+        results.append((d, cur.fetchone()[0]))
+    conn.close()
+    return results
+
+def analytics_get_weekly_counts(weeks=12):
+    """Returns list of (week_label, count) for the last `weeks` weeks."""
+    from datetime import timedelta
+    conn = sqlite3.connect("barangay_visitors.db")
+    cur = conn.cursor()
+    results = []
+    today = datetime.now().date()
+    for i in range(weeks - 1, -1, -1):
+        start = today - timedelta(days=today.weekday()) - timedelta(weeks=i)
+        end   = start + timedelta(days=6)
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date BETWEEN ? AND ?",
+                    (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
+        label = f"Wk {start.strftime('%m/%d')}"
+        results.append((label, cur.fetchone()[0]))
+    conn.close()
+    return results
+
+def analytics_get_monthly_counts(months=12):
+    """Returns list of (month_label, count) for the last `months` months."""
+    from datetime import timedelta
+    import calendar
+    conn = sqlite3.connect("barangay_visitors.db")
+    cur = conn.cursor()
+    results = []
+    today = datetime.now()
+    for i in range(months - 1, -1, -1):
+        month = today.month - i
+        year  = today.year
+        while month <= 0:
+            month += 12
+            year  -= 1
+        _, last_day = calendar.monthrange(year, month)
+        start = f"{year}-{month:02d}-01"
+        end   = f"{year}-{month:02d}-{last_day:02d}"
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date BETWEEN ? AND ?", (start, end))
+        label = datetime(year, month, 1).strftime("%b %Y")
+        results.append((label, cur.fetchone()[0]))
+    conn.close()
+    return results
+
+def analytics_get_purpose_counts():
+    """Returns dict of purpose -> count."""
+    conn = sqlite3.connect("barangay_visitors.db")
+    cur = conn.cursor()
+    purposes = [
+        "Business / Transaction",
+        "Certificate Request",
+        "Complaint / Concern",
+        "Clearance Application",
+        "Meeting / Appointment",
+        "Social Service Inquiry",
+        "Other",
+    ]
+    results = {}
+    for p in purposes:
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE purpose=?", (p,))
+        results[p] = cur.fetchone()[0]
+    # Catch anything not in the standard list (e.g. free-text "Other" entries)
+    formatted = ", ".join(f"'{x}'" for x in purposes)
+    cur.execute(f"SELECT COUNT(*) FROM visitors WHERE purpose NOT IN ({formatted})")
+    extra = cur.fetchone()[0]
+    results["Other"] = results.get("Other", 0) + extra
+    conn.close()
+    return results
+
+def analytics_get_hourly_counts():
+    """Returns list of (hour_label, count) for hours 0-23."""
+    conn = sqlite3.connect("barangay_visitors.db")
+    cur = conn.cursor()
+    results = []
+    for h in range(24):
+        hstr = f"{h:02d}:"
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_time LIKE ?", (hstr + "%",))
+        label = f"{h:02d}:00"
+        results.append((label, cur.fetchone()[0]))
+    conn.close()
+    return results
+
+def analytics_get_top_persons(limit=10):
+    """Returns list of (person_to_see, count) top visited persons."""
+    conn = sqlite3.connect("barangay_visitors.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT person_to_see, COUNT(*) as cnt FROM visitors
+        WHERE person_to_see IS NOT NULL AND person_to_see != ''
+        GROUP BY person_to_see ORDER BY cnt DESC LIMIT ?
+    """, (limit,))
+    results = cur.fetchall()
+    conn.close()
+    return results
+
+
+# ============================================================
+#  ANALYTICS SCREEN  –  YouTube-style dark analytics (same window)
+# ============================================================
+
+def show_analytics_screen(root, main_frame, sidebar_nav=None):
+    for w in main_frame.winfo_children():
+        w.destroy()
+
+    if sidebar_nav:
+        sidebar_nav["update"]("visitor_log")
+
+    # ── COLOR PALETTE (light mode) ──────────────────────────
+    A_BG        = "#F5F5F5"
+    A_SURFACE   = "#FFFFFF"
+    A_SURFACE2  = "#F0F0F0"
+    A_BORDER    = "#DEDEDE"
+    A_TEXT      = "#1A1A1A"
+    A_MUTED     = "#777777"
+    A_BLUE      = "#1A73E8"
+    A_RED       = "#CC0000"
+    A_GREEN     = "#0A8A5C"
+    A_GOLD      = "#C47D00"
+    A_PURPLE    = "#7B2FBE"
+    A_TEAL      = "#007B9E"
+
+    BAR_COLORS = [A_BLUE, A_RED, A_GREEN, A_GOLD, A_PURPLE, A_TEAL,
+                  "#E74C3C", "#2ECC71", "#F39C12", "#1ABC9C", "#E67E22", "#8E44AD"]
+
+    main_frame.configure(bg=A_BG)
+
+    # ── TOP HEADER ──────────────────────────────────────────
+    header = tk.Frame(main_frame, bg=C_RED_DARK, height=56)
+    header.pack(fill="x")
+    header.pack_propagate(False)
+    tk.Label(header, text="  📈  Analytics",
+             font=("Segoe UI", 15, "bold"),
+             bg=C_RED_DARK, fg=C_WHITE).pack(side="left", padx=20, fill="y")
+    tk.Label(header, text="Visitor Insights — Barangay San Andres",
+             font=("Segoe UI", 10),
+             bg=C_RED_DARK, fg=C_TEXT_LIGHT).pack(side="left", fill="y")
+
+    # "Visitor Log" button — goes back to admin
+    back_to_log_btn = RoundedButton(header, text="📋  Visitor Log",
+                                    bg=C_RED_MID,
+                                    activebackground=C_RED_DARK,
+                                    min_width=160,
+                                    command=lambda: show_admin_screen(root, main_frame, sidebar_nav))
+    back_to_log_btn.pack(side="right", padx=14, pady=8)
+
+    tk.Frame(main_frame, bg=A_BLUE, height=2).pack(fill="x")
+
+    # ── TAB BAR ─────────────────────────────────────────────
+    tab_bar = tk.Frame(main_frame, bg=A_SURFACE, height=44)
+    tab_bar.pack(fill="x")
+    tab_bar.pack_propagate(False)
+
+    active_tab = [0]
+    tab_frames  = {}
+    tab_buttons = {}
+
+    def make_tab_btn(parent, label, idx):
+        f = tk.Frame(parent, bg=A_SURFACE, cursor="hand2")
+        f.pack(side="left")
+        indicator = tk.Frame(f, bg=A_BLUE if idx == 0 else A_SURFACE, height=3)
+        indicator.pack(fill="x", side="bottom")
+        lbl = tk.Label(f, text=label,
+                       font=("Segoe UI", 10, "bold" if idx == 0 else "normal"),
+                       bg=A_SURFACE, fg=A_TEXT if idx == 0 else A_MUTED,
+                       padx=20, pady=12, cursor="hand2")
+        lbl.pack()
+        tab_buttons[idx] = (lbl, indicator)
+
+        def on_click(e, i=idx):
+            if active_tab[0] == i:
+                return
+            if i not in tab_frames:
+                return
+            old = active_tab[0]
+            ob, oi = tab_buttons[old]
+            ob.config(fg=A_MUTED, font=("Segoe UI", 10))
+            oi.config(bg=A_SURFACE)
+            active_tab[0] = i
+            lbl.config(fg=A_TEXT, font=("Segoe UI", 10, "bold"))
+            indicator.config(bg=A_BLUE)
+            for k, fr in tab_frames.items():
+                fr.pack_forget()
+            tab_frames[i].pack(fill="both", expand=True)
+
+        for w in [f, lbl]:
+            w.bind("<Button-1>", on_click)
+
+    make_tab_btn(tab_bar, "Overview",      0)
+    make_tab_btn(tab_bar, "Purpose",       1)
+    make_tab_btn(tab_bar, "Time of Visit", 2)
+    make_tab_btn(tab_bar, "Person to See", 3)
+
+    tk.Frame(tab_bar, bg=A_BORDER, height=1).pack(side="bottom", fill="x")
+
+    # ── SCROLL CONTAINER HELPER ──────────────────────────────
+    def make_scroll_frame(parent):
+        outer = tk.Frame(parent, bg=A_BG)
+        canvas = tk.Canvas(outer, bg=A_BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=A_BG)
+        win_id = canvas.create_window(0, 0, anchor="nw", window=inner)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+
+        def _on_mw(e):
+            try:
+                canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+            except Exception:
+                pass
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mw))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        return outer, inner
+
+    def ana_card(parent, title, subtitle=""):
+        card = tk.Frame(parent, bg=A_SURFACE,
+                        highlightbackground=A_BORDER, highlightthickness=1)
+        card.pack(fill="x", padx=24, pady=(16, 0))
+        tk.Frame(card, bg=A_BLUE, height=3).pack(fill="x")
+        body = tk.Frame(card, bg=A_SURFACE, padx=24, pady=18)
+        body.pack(fill="both", expand=True)
+        hrow = tk.Frame(body, bg=A_SURFACE)
+        hrow.pack(fill="x", pady=(0, 4))
+        tk.Label(hrow, text=title, font=("Segoe UI", 12, "bold"),
+                 bg=A_SURFACE, fg=A_TEXT).pack(side="left")
+        if subtitle:
+            tk.Label(hrow, text=f"  {subtitle}", font=("Segoe UI", 9),
+                     bg=A_SURFACE, fg=A_MUTED).pack(side="left")
+        tk.Frame(body, bg=A_BORDER, height=1).pack(fill="x", pady=(8, 14))
+        return body
+
+    def draw_bar_chart(parent, data, bar_color=A_BLUE, height=220, bg=A_SURFACE,
+                       show_values=True, label_every=1, rotate_labels=False):
+        if not data:
+            tk.Label(parent, text="No data available.", font=("Segoe UI", 10),
+                     bg=bg, fg=A_MUTED).pack(pady=20)
+            return
+        labels = [d[0] for d in data]
+        values = [d[1] for d in data]
+        max_val = max(values) if max(values) > 0 else 1
+
+        c = tk.Canvas(parent, bg=bg, height=height, highlightthickness=0)
+        c.pack(fill="x", pady=(0, 8))
+
+        def _draw(e=None):
+            c.delete("all")
+            w = c.winfo_width()
+            if w < 50:
+                return
+            margin_l, margin_r, margin_top, margin_bot = 52, 16, 16, 50 if rotate_labels else 38
+            chart_w = w - margin_l - margin_r
+            chart_h = height - margin_top - margin_bot
+            n = len(labels)
+            bar_w = max(4, chart_w // n - 4)
+            gap   = max(2, (chart_w - bar_w * n) // (n + 1))
+
+            for step in range(0, 6):
+                y = margin_top + chart_h - int(chart_h * step / 5)
+                val_label = int(max_val * step / 5)
+                c.create_line(margin_l, y, w - margin_r, y, fill=A_BORDER, dash=(4, 4))
+                c.create_text(margin_l - 6, y, text=str(val_label), anchor="e",
+                               fill=A_MUTED, font=("Segoe UI", 7))
+
+            for i, (lbl, val) in enumerate(zip(labels, values)):
+                x1 = margin_l + gap + i * (bar_w + gap)
+                x2 = x1 + bar_w
+                bar_h = int(chart_h * val / max_val) if max_val > 0 else 0
+                y1 = margin_top + chart_h - bar_h
+                y2 = margin_top + chart_h
+                color = bar_color if isinstance(bar_color, str) else bar_color[i % len(bar_color)]
+                c.create_rectangle(x1, y1, x2, y2, fill=color, outline="", width=0)
+                if show_values and val > 0:
+                    c.create_text((x1 + x2) // 2, y1 - 5, text=str(val), anchor="s",
+                                   fill=A_TEXT, font=("Segoe UI", 7, "bold"))
+                if i % label_every == 0:
+                    lbl_short = lbl if len(lbl) <= 10 else lbl[:9] + "…"
+                    if rotate_labels:
+                        c.create_text((x1 + x2) // 2, y2 + 6, text=lbl_short,
+                                       anchor="nw", angle=40, fill=A_MUTED, font=("Segoe UI", 7))
+                    else:
+                        c.create_text((x1 + x2) // 2, y2 + 4, text=lbl_short,
+                                       anchor="n", fill=A_MUTED, font=("Segoe UI", 7))
+
+            c.create_line(margin_l, margin_top, margin_l, margin_top + chart_h,
+                          fill=A_MUTED, width=1)
+            c.create_line(margin_l, margin_top + chart_h, w - margin_r, margin_top + chart_h,
+                          fill=A_MUTED, width=1)
+
+        c.bind("<Configure>", _draw)
+        c.after(80, _draw)
+
+    def stat_pill(parent, label, value, color):
+        f = tk.Frame(parent, bg=A_SURFACE2,
+                     highlightbackground=color, highlightthickness=2)
+        f.pack(side="left", padx=8, pady=4)
+        tk.Label(f, text=value, font=("Segoe UI", 22, "bold"),
+                 bg=A_SURFACE2, fg=color).pack(padx=20, pady=(12, 2))
+        tk.Label(f, text=label, font=("Segoe UI", 9),
+                 bg=A_SURFACE2, fg=A_MUTED).pack(padx=20, pady=(0, 12))
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 0 — OVERVIEW
+    # ══════════════════════════════════════════════════════════
+    overview_outer, overview = make_scroll_frame(main_frame)
+    tab_frames[0] = overview_outer
+
+    def build_overview(parent):
+        from datetime import timedelta
+        today_str   = datetime.now().strftime("%Y-%m-%d")
+        week_start  = (datetime.now().date() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+        month_start = datetime.now().strftime("%Y-%m-01")
+
+        conn = sqlite3.connect("barangay_visitors.db")
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date=?", (today_str,))
+        today_cnt = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date >= ?", (week_start,))
+        week_cnt = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date >= ?", (month_start,))
+        month_cnt = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM visitors")
+        total_cnt = cur.fetchone()[0]
+        conn.close()
+
+        pill_card = ana_card(parent, "📊 Summary",
+                              f"as of {datetime.now().strftime('%B %d, %Y %I:%M %p')}")
+        pills_row = tk.Frame(pill_card, bg=A_SURFACE)
+        pills_row.pack(fill="x", pady=4)
+        stat_pill(pills_row, "Today",      str(today_cnt), A_BLUE)
+        stat_pill(pills_row, "This Week",  str(week_cnt),  A_GREEN)
+        stat_pill(pills_row, "This Month", str(month_cnt), A_GOLD)
+        stat_pill(pills_row, "All Time",   str(total_cnt), A_RED)
+
+        daily_card = ana_card(parent, "📅 Daily Visitors", "Last 30 days")
+        daily_data = analytics_get_daily_counts(30)
+        draw_bar_chart(daily_card, daily_data, bar_color=A_BLUE, height=240,
+                       bg=A_SURFACE, label_every=max(1, len(daily_data)//10), rotate_labels=True)
+
+        week_card = ana_card(parent, "📆 Weekly Visitors", "Last 12 weeks")
+        draw_bar_chart(week_card, analytics_get_weekly_counts(12), bar_color=A_GREEN,
+                       height=220, bg=A_SURFACE)
+
+        month_card = ana_card(parent, "🗓 Monthly Visitors", "Last 12 months")
+        draw_bar_chart(month_card, analytics_get_monthly_counts(12), bar_color=A_GOLD,
+                       height=220, bg=A_SURFACE)
+
+        tk.Frame(parent, bg=A_BG, height=30).pack()
+
+    build_overview(overview)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 1 — PURPOSE
+    # ══════════════════════════════════════════════════════════
+    purpose_outer, purpose_frame = make_scroll_frame(main_frame)
+    tab_frames[1] = purpose_outer
+
+    def build_purpose(parent):
+        purpose_data = analytics_get_purpose_counts()
+        total = sum(purpose_data.values()) or 1
+        short_labels = {
+            "Business / Transaction": "Business",
+            "Certificate Request":    "Certificate",
+            "Complaint / Concern":    "Complaint",
+            "Clearance Application":  "Clearance",
+            "Meeting / Appointment":  "Meeting",
+            "Social Service Inquiry": "Social Svc",
+            "Other":                  "Other",
+        }
+        sorted_purposes = sorted(purpose_data.items(), key=lambda x: x[1], reverse=True)
+
+        bar_card = ana_card(parent, "📋 Visits by Purpose", "All time breakdown")
+        bar_data = [(short_labels.get(p, p), v) for p, v in sorted_purposes]
+        draw_bar_chart(bar_card, bar_data, bar_color=BAR_COLORS, height=260, bg=A_SURFACE)
+
+        tbl_card = ana_card(parent, "📊 Purpose Details")
+        for i, (purpose, count) in enumerate(sorted_purposes):
+            row_bg = A_SURFACE if i % 2 == 0 else A_SURFACE2
+            row = tk.Frame(tbl_card, bg=row_bg)
+            row.pack(fill="x", pady=1)
+            color = BAR_COLORS[i % len(BAR_COLORS)]
+            tk.Label(row, text="█", font=("Segoe UI", 11), bg=row_bg, fg=color).pack(
+                side="left", padx=(8, 4), pady=6)
+            tk.Label(row, text=purpose, font=("Segoe UI", 10), bg=row_bg, fg=A_TEXT,
+                     anchor="w").pack(side="left", fill="x", expand=True, pady=6)
+            pct = f"{count / total * 100:.1f}%"
+            tk.Label(row, text=pct, font=("Segoe UI", 9), bg=row_bg, fg=A_MUTED).pack(
+                side="right", padx=8)
+            tk.Label(row, text=str(count), font=("Segoe UI", 10, "bold"),
+                     bg=row_bg, fg=color).pack(side="right", padx=16)
+            prog_outer = tk.Frame(tbl_card, bg=A_SURFACE2, height=4)
+            prog_outer.pack(fill="x", padx=8, pady=(0, 2))
+            prog_outer.pack_propagate(False)
+            tk.Frame(prog_outer, bg=color, height=4).place(relwidth=count/total, relheight=1.0)
+
+        tk.Frame(parent, bg=A_BG, height=30).pack()
+
+    build_purpose(purpose_frame)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 2 — TIME
+    # ══════════════════════════════════════════════════════════
+    time_outer, time_frame = make_scroll_frame(main_frame)
+    tab_frames[2] = time_outer
+
+    def build_time(parent):
+        hourly_data = analytics_get_hourly_counts()
+        peak_hour   = max(hourly_data, key=lambda x: x[1], default=("--", 0))
+
+        hour_card = ana_card(parent, "⏰ Hourly Visit Distribution", "All records — 24-hour view")
+        peak_row = tk.Frame(hour_card, bg=A_SURFACE)
+        peak_row.pack(fill="x", pady=(0, 12))
+        tk.Label(peak_row, text="🔥  Peak Hour: ", font=("Segoe UI", 10, "bold"),
+                 bg=A_SURFACE, fg=A_MUTED).pack(side="left")
+        tk.Label(peak_row, text=f"{peak_hour[0]}  ({peak_hour[1]} visitors)",
+                 font=("Segoe UI", 11, "bold"), bg=A_SURFACE, fg=A_GOLD).pack(side="left")
+        draw_bar_chart(hour_card, hourly_data, bar_color=A_TEAL, height=280,
+                       bg=A_SURFACE, label_every=2)
+
+        am_total = sum(cnt for lbl, cnt in hourly_data[:12])
+        pm_total = sum(cnt for lbl, cnt in hourly_data[12:])
+        split_card = ana_card(parent, "🌤 AM vs PM Breakdown")
+        split_row = tk.Frame(split_card, bg=A_SURFACE)
+        split_row.pack(fill="x")
+        stat_pill(split_row, "Morning (AM)",   str(am_total), A_GOLD)
+        stat_pill(split_row, "Afternoon (PM)", str(pm_total), A_PURPLE)
+
+        tk.Frame(parent, bg=A_BG, height=30).pack()
+
+    build_time(time_frame)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 3 — PERSON TO SEE
+    # ══════════════════════════════════════════════════════════
+    person_outer, person_frame = make_scroll_frame(main_frame)
+    tab_frames[3] = person_outer
+
+    def build_person(parent):
+        persons = analytics_get_top_persons(15)
+        person_card = ana_card(parent, "👤 Top Persons Visited", "Most frequently requested")
+
+        if not persons:
+            tk.Label(person_card, text="No person-to-see data recorded yet.",
+                     font=("Segoe UI", 10), bg=A_SURFACE, fg=A_MUTED).pack(pady=20)
+        else:
+            max_cnt = persons[0][1] if persons else 1
+            rank_color = [A_GOLD, "#C0C0C0", "#CD7F32"] + [A_MUTED] * 20
+            for i, (name, cnt) in enumerate(persons):
+                row_bg = A_SURFACE if i % 2 == 0 else A_SURFACE2
+                row = tk.Frame(person_card, bg=row_bg)
+                row.pack(fill="x", pady=2)
+                tk.Label(row, text=f"#{i+1}", font=("Segoe UI", 10, "bold"),
+                         bg=row_bg, fg=rank_color[i], width=4).pack(side="left", pady=8)
+                tk.Label(row, text=name, font=("Segoe UI", 10), bg=row_bg,
+                         fg=A_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
+                tk.Label(row, text=f"{cnt} visit{'s' if cnt != 1 else ''}",
+                         font=("Segoe UI", 10, "bold"), bg=row_bg, fg=A_BLUE).pack(
+                    side="right", padx=16)
+                prog_outer = tk.Frame(person_card, bg=A_SURFACE2, height=5)
+                prog_outer.pack(fill="x", padx=8, pady=(0, 2))
+                prog_outer.pack_propagate(False)
+                tk.Frame(prog_outer, bg=A_BLUE, height=5).place(
+                    relwidth=cnt / max_cnt, relheight=1.0)
+
+        if persons:
+            chart_card = ana_card(parent, "📊 Visit Count Chart")
+            chart_data = [(p[:18] + "…" if len(p) > 18 else p, c) for p, c in persons[:10]]
+            draw_bar_chart(chart_card, chart_data, bar_color=A_PURPLE, height=260,
+                           bg=A_SURFACE, label_every=1, rotate_labels=True)
+
+        tk.Frame(parent, bg=A_BG, height=30).pack()
+
+    build_person(person_frame)
+
+    # Show first tab
+    tab_frames[0].pack(fill="both", expand=True)
+
+
 
 def show_admin_screen(root, main_frame, sidebar_nav=None):
     for w in main_frame.winfo_children():
@@ -1267,6 +1759,8 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     _inactivity_after_id = [None]
     INACTIVITY_SECONDS = 5 * 60
 
+    _inactivity_bind_ids = [None, None, None]
+
     def _cancel_inactivity_timer():
         try:
             if _inactivity_after_id[0]:
@@ -1274,12 +1768,14 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                 _inactivity_after_id[0] = None
         except Exception:
             _inactivity_after_id[0] = None
-        try:
-            root.unbind_all('<Any-KeyPress>')
-            root.unbind_all('<Motion>')
-            root.unbind_all('<Button>')
-        except Exception:
-            pass
+        # Only unbind the specific bind IDs we registered
+        for i, event in enumerate(['<KeyPress>', '<Motion>', '<ButtonPress>']):
+            try:
+                if _inactivity_bind_ids[i]:
+                    root.unbind(event, _inactivity_bind_ids[i])
+                    _inactivity_bind_ids[i] = None
+            except Exception:
+                _inactivity_bind_ids[i] = None
 
     def _do_inactivity_logout():
         _cancel_inactivity_timer()
@@ -1298,9 +1794,10 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         _inactivity_after_id[0] = root.after(INACTIVITY_SECONDS * 1000, _do_inactivity_logout)
 
     def _bind_inactivity_events():
-        root.bind_all('<Any-KeyPress>', _reset_inactivity_timer)
-        root.bind_all('<Motion>', _reset_inactivity_timer)
-        root.bind_all('<Button>', _reset_inactivity_timer)
+        # Use root.bind (not bind_all) so bindings don't bleed into other screens
+        _inactivity_bind_ids[0] = root.bind('<KeyPress>',    _reset_inactivity_timer, '+')
+        _inactivity_bind_ids[1] = root.bind('<Motion>',      _reset_inactivity_timer, '+')
+        _inactivity_bind_ids[2] = root.bind('<ButtonPress>', _reset_inactivity_timer, '+')
 
     # Start listening for activity
     _bind_inactivity_events()
@@ -1474,6 +1971,14 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                             command=export_records)
     dl_btn.pack(side="left", padx=4)
 
+    analytics_btn = RoundedButton(action_group, text="📈  Analytics",
+                                   bg="#1A56A0",
+                                   activebackground="#0F3870",
+                                   min_width=140,
+                                   command=lambda: [_cancel_inactivity_timer(),
+                                                    show_analytics_screen(root, main_frame, sidebar_nav)])
+    analytics_btn.pack(side="left", padx=4)
+
     # ── TABLE ────────────────────────────────────────────────
     table_outer = tk.Frame(main_frame, bg=C_WHITE,
                             highlightbackground=C_BORDER, highlightthickness=1)
@@ -1585,14 +2090,14 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
 # ============================================================
 
 # Dark mode palette
-DK_BG       = "#0F0F0F"
-DK_SURFACE  = "#1C1C1E"
-DK_SURFACE2 = "#2A2A2E"
-DK_BORDER   = "#3A3A3E"
-DK_TEXT     = "#F2F2F7"
-DK_MUTED    = "#8E8E93"
-DK_RED      = "#FF3B30"
-DK_GOLD     = "#FFD60A"
+DK_BG       = "#F5F5F5"
+DK_SURFACE  = "#FFFFFF"
+DK_SURFACE2 = "#F0F0F0"
+DK_BORDER   = "#D0D0D5"
+DK_TEXT     = "#1C1C1E"
+DK_MUTED    = "#6B6B70"
+DK_RED      = "#B22222"
+DK_GOLD     = "#C8900A"
 
 def show_settings_screen(root, main_frame, sidebar_nav=None):
     for w in main_frame.winfo_children():
@@ -1605,19 +2110,32 @@ def show_settings_screen(root, main_frame, sidebar_nav=None):
     topbar = tk.Frame(main_frame, bg=DK_BG, height=56)
     topbar.pack(fill="x")
     topbar.pack_propagate(False)
-    tk.Label(topbar, text="  ⚙  SETTINGS",
+    tk.Label(topbar, text="  ℹ  ABOUT",
              font=("Georgia", 12, "bold"),
              bg=DK_BG, fg=DK_TEXT).pack(side="left", padx=16, fill="y")
     tk.Frame(main_frame, bg=DK_GOLD, height=3).pack(fill="x")
 
-    # Dark scrollable body
-    body_canvas = tk.Canvas(main_frame, bg=DK_BG, highlightthickness=0)
-    body_canvas.pack(fill="both", expand=True)
+    # Light scrollable body
+    scroll_frame = tk.Frame(main_frame, bg=DK_BG)
+    scroll_frame.pack(fill="both", expand=True)
+
+    scrollbar = tk.Scrollbar(scroll_frame, orient="vertical")
+    scrollbar.pack(side="right", fill="y")
+
+    body_canvas = tk.Canvas(scroll_frame, bg=DK_BG, highlightthickness=0,
+                            yscrollcommand=scrollbar.set)
+    body_canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=body_canvas.yview)
 
     body_inner = tk.Frame(body_canvas, bg=DK_BG)
     inner_id = body_canvas.create_window(0, 0, anchor="nw", window=body_inner)
     body_inner.bind("<Configure>", lambda e: body_canvas.configure(scrollregion=body_canvas.bbox("all")))
     body_canvas.bind("<Configure>", lambda e: body_canvas.itemconfig(inner_id, width=e.width))
+
+    def _on_mousewheel(event):
+        body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    body_canvas.bind("<MouseWheel>", _on_mousewheel)
+    body_inner.bind("<MouseWheel>", _on_mousewheel)
 
     def dk_card(parent, title=None, subtitle=None):
         frame = tk.Frame(parent, bg=DK_SURFACE,
@@ -1633,44 +2151,92 @@ def show_settings_screen(root, main_frame, sidebar_nav=None):
             tk.Label(inner, text=subtitle, font=("Segoe UI", 9),
                      bg=DK_SURFACE, fg=DK_MUTED).pack(anchor="w", pady=(0, 14))
             tk.Frame(inner, bg=DK_BORDER, height=1).pack(fill="x", pady=(0, 18))
+        frame.bind("<MouseWheel>", _on_mousewheel)
+        inner.bind("<MouseWheel>", _on_mousewheel)
         return inner
 
-    # ── About card ───────────────────────────────────────────
-    ab = dk_card(body_inner,
-                 title="About This System",
-                 subtitle="Barangay San Andres — Visitor Log System")
+    def info_row(parent, label, value):
+        row = tk.Frame(parent, bg=DK_SURFACE)
+        row.pack(fill="x", pady=5)
+        lbl1 = tk.Label(row, text=label, font=("Segoe UI", 9, "bold"),
+                 bg=DK_SURFACE, fg=DK_MUTED, width=22, anchor="w")
+        lbl1.pack(side="left")
+        lbl2 = tk.Label(row, text=value, font=("Segoe UI", 9),
+                 bg=DK_SURFACE, fg=DK_TEXT)
+        lbl2.pack(side="left")
+        row.bind("<MouseWheel>", _on_mousewheel)
+        lbl1.bind("<MouseWheel>", _on_mousewheel)
+        lbl2.bind("<MouseWheel>", _on_mousewheel)
 
-    info_rows = [
-        ("🏛  Barangay", "San Andres, Santiago City, Isabela"),
-        ("💾  Version", "2.0"),
-        ("🐍  Built With", "Python 3  &  SQLite"),
-        ("📁  Database", "barangay_visitors.db"),
-        ("🏢  Office", "Barangay Records Office"),
+    # ── System Info card ─────────────────────────────────────
+    ab = dk_card(body_inner,
+                 title="🏛  Barangay San Andres",
+                 subtitle="Visitor Log & Records Management System")
+
+    info_row(ab, "📍  Location",    "San Andres, Santiago City, Isabela")
+    info_row(ab, "🏢  Office",      "Barangay Records Office")
+    info_row(ab, "👤  Managed By",  "Barangay Officials & Staff")
+    info_row(ab, "📋  System Name", "Barangay Visitor Log System")
+    info_row(ab, "💾  Version",     "2.0")
+    info_row(ab, "📅  Year",        "2025")
+
+    # ── Technical card ───────────────────────────────────────
+    tech = dk_card(body_inner,
+                   title="🛠  Technical Information",
+                   subtitle="Stack and environment details")
+
+    info_row(tech, "🐍  Language",   "Python 3")
+    info_row(tech, "🖼  UI Library", "Tkinter (built-in)")
+    info_row(tech, "🗄  Database",   "SQLite3  —  barangay_visitors.db")
+    info_row(tech, "📦  Packaging",  "PyInstaller (for .exe build)")
+    info_row(tech, "🖥  Platform",   "Windows / Cross-platform")
+
+    # ── Features card ────────────────────────────────────────
+    feat = dk_card(body_inner,
+                   title="✅  Features",
+                   subtitle="What this system can do")
+
+    features = [
+        "Register and log visitor entries",
+        "Track purpose of visit and person to see",
+        "Admin panel with full visitor records",
+        "Search and filter visitor logs",
+        "Export records to text file",
+        "Analytics dashboard with charts",
+        "Auto logout after 5 minutes of inactivity",
+        "Password-protected admin access",
     ]
-    for label, value in info_rows:
-        row = tk.Frame(ab, bg=DK_SURFACE)
-        row.pack(fill="x", pady=4)
-        tk.Label(row, text=label, font=("Segoe UI", 9, "bold"),
-                 bg=DK_SURFACE, fg=DK_MUTED, width=18, anchor="w").pack(side="left")
-        tk.Label(row, text=value, font=("Segoe UI", 9),
+    for feat_text in features:
+        row = tk.Frame(feat, bg=DK_SURFACE)
+        row.pack(fill="x", pady=3)
+        tk.Label(row, text="✦", font=("Segoe UI", 9),
+                 bg=DK_SURFACE, fg=DK_GOLD).pack(side="left", padx=(0, 10))
+        tk.Label(row, text=feat_text, font=("Segoe UI", 9),
                  bg=DK_SURFACE, fg=DK_TEXT).pack(side="left")
 
-    # ── Appearance card ──────────────────────────────────────
-    ap = dk_card(body_inner,
-                 title="Appearance",
-                 subtitle="Current display settings for this application.")
+    # ── Developer card ───────────────────────────────────────
+    dev = dk_card(body_inner,
+                  title="💻  Developer Notes",
+                  subtitle="Built for Barangay San Andres")
 
-
-    row2 = tk.Frame(ap, bg=DK_SURFACE)
-    row2.pack(fill="x", pady=4)
-    tk.Label(row2, text="🎨  Accent Color", font=("Segoe UI", 9, "bold"),
-             bg=DK_SURFACE, fg=DK_MUTED, width=18, anchor="w").pack(side="left")
-    color_dot = tk.Label(row2, text="  ●  Crimson Red  (#CC0000)", font=("Segoe UI", 9),
-                          bg=DK_SURFACE, fg="#FF5555")
-    color_dot.pack(side="left")
+    note_lines = [
+        "This system was developed to digitize and streamline",
+        "the barangay's visitor registration process, replacing",
+        "manual logbooks with a fast, searchable digital record.",
+    ]
+    for line in note_lines:
+        tk.Label(dev, text=line, font=("Segoe UI", 9),
+                 bg=DK_SURFACE, fg=DK_TEXT, anchor="w").pack(fill="x", pady=1)
 
     # Spacer at bottom
     tk.Frame(body_inner, bg=DK_BG, height=40).pack()
+
+    # Bind mousewheel to every widget in the scroll area recursively
+    def bind_mousewheel_recursive(widget):
+        widget.bind("<MouseWheel>", _on_mousewheel)
+        for child in widget.winfo_children():
+            bind_mousewheel_recursive(child)
+    body_inner.after(100, lambda: bind_mousewheel_recursive(body_inner))
 
 
 # ============================================================
@@ -1778,7 +2344,7 @@ def main():
     nav_items = [
         ("visitor_entry", "👤", "Visitor Entry"),
         ("visitor_log", "•", "Visitor Log"),
-        ("settings", "⚙", "Settings"),
+        ("settings", "ℹ", "About"),
     ]
 
     for key, icon, text in nav_items:
