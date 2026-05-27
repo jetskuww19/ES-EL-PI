@@ -760,7 +760,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     content_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
     # ── CARD — draw rounded rect directly on content_canvas for true transparent corners ──
-    CARD_W = 500
+    CARD_W = 700
     CARD_MIN_H = 570
     CARD_RADIUS = 24
 
@@ -822,7 +822,9 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             return None
         try:
             from PIL import Image, ImageTk
-            img = Image.open(path).resize((size, size), Image.LANCZOS)
+            img = Image.open(path)
+            # Use thumbnail to maintain aspect ratio while fitting within size x size box
+            img.thumbnail((size, size), Image.LANCZOS)
             return ImageTk.PhotoImage(img)
         except Exception:
             try:
@@ -830,8 +832,8 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             except Exception:
                 return None
 
-    logo1 = _load_logo(os.path.join(logo_dir, "logo.png"), 112)
-    logo2 = _load_logo(os.path.join(logo_dir, "sk.png"), 90)
+    logo1 = _load_logo(os.path.join(logo_dir, "stgo.png"), 112)
+    logo2 = _load_logo(os.path.join(logo_dir, "logo.png"), 112)
     _card_logos[0], _card_logos[1] = logo1, logo2
 
     left_logo_lbl = tk.Label(header_frame, bg=C_WHITE)
@@ -2001,6 +2003,12 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                      foreground=C_WHITE,
                      relief="flat",
                      borderwidth=0)
+    # Make heading text dark gray on hover for better visibility
+    try:
+        style2.map("Modern.Treeview.Heading",
+                   foreground=[('active', C_TEXT_DARK), ('!active', C_WHITE)])
+    except Exception:
+        pass
     style2.map("Modern.Treeview",
                background=[("selected", C_RED_LIGHT)],
                foreground=[("selected", C_RED_DARK)])
@@ -2270,7 +2278,7 @@ def main():
     logo_area.pack(fill="x", pady=(20, 0))
 
     logo_dir = os.path.join(os.path.dirname(__file__), "logo")
-    logo_path = os.path.join(logo_dir, "stgo.png")
+    logo_path = os.path.join(logo_dir, "logo.png")
     _sidebar_logos = [None]
     if os.path.exists(logo_path):
         try:
