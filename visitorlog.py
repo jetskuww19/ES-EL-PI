@@ -122,8 +122,8 @@ def is_valid_date(date_text):
 
 def is_valid_time(time_text):
     try:
-        if not re.match(r"^\d{2}:\d{2}$", time_text): return False
-        datetime.strptime(time_text, "%H:%M"); return True
+        if not re.match(r"^\d{1,2}:\d{2}\s(AM|PM)$", time_text, re.IGNORECASE): return False
+        datetime.strptime(time_text, "%I:%M %p"); return True
     except ValueError:
         return False
 
@@ -904,7 +904,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     other_purpose_var = tk.StringVar()
     
     date_var          = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-    time_var          = tk.StringVar(value=datetime.now().strftime("%H:%M"))
+    time_var          = tk.StringVar(value=datetime.now().strftime("%I:%M %p"))
     person_var        = tk.StringVar()
     
     # Register form variables to sync with the sidebar clock
@@ -1246,7 +1246,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             person_var.set("")
             other_row.pack_forget()
             date_var.set(datetime.now().strftime("%Y-%m-%d"))
-            time_var.set(datetime.now().strftime("%H:%M"))
+            time_var.set(datetime.now().strftime("%I:%M %p"))
         except Exception as error:
             messagebox.showerror("Error", str(error))
 
@@ -2447,7 +2447,7 @@ def main():
         if form_vars["date_var"] is not None:
             form_vars["date_var"].set(now.strftime("%Y-%m-%d"))
         if form_vars["time_var"] is not None:
-            form_vars["time_var"].set(now.strftime("%H:%M"))
+            form_vars["time_var"].set(now.strftime("%I:%M %p"))
             
         root.after(1000, update_clock)
     update_clock()
