@@ -77,6 +77,7 @@ def create_database():
 def insert_visitor(full_name, contact, address, purpose, visit_date, visit_time, person_to_see=""):
     connection = sqlite3.connect("barangay_visitors.db")
     cursor = connection.cursor()
+    person_to_see = person_to_see.strip().title() if person_to_see else ""
     cursor.execute("""
         INSERT INTO visitors (full_name, contact, address, purpose, visit_date, visit_time, person_to_see)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -87,7 +88,7 @@ def insert_visitor(full_name, contact, address, purpose, visit_date, visit_time,
 def get_all_visitors(search=""):
     connection = sqlite3.connect("barangay_visitors.db")
     cursor = connection.cursor()
-    base = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors"
+    base = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors"
     if search:
         like = "%" + search + "%"
         cursor.execute(base + " WHERE full_name LIKE ? OR contact LIKE ? OR purpose LIKE ? OR address LIKE ? ORDER BY id DESC",
@@ -101,6 +102,7 @@ def get_all_visitors(search=""):
 def update_visitor(visitor_id, full_name, contact, address, purpose, visit_date, visit_time, person_to_see=""):
     connection = sqlite3.connect("barangay_visitors.db")
     cursor = connection.cursor()
+    person_to_see = person_to_see.strip().title() if person_to_see else ""
     cursor.execute("""
         UPDATE visitors SET full_name=?, contact=?, address=?, purpose=?, visit_date=?, visit_time=?, person_to_see=? WHERE id=?
     """, (full_name, contact, address, purpose, visit_date, visit_time, person_to_see, visitor_id))
@@ -1372,15 +1374,15 @@ def analytics_get_hourly_counts():
     return results
 
 def analytics_get_top_persons(limit=10):
-    """Returns list of (person_to_see, count) top visited persons."""
+    """Returns list of (person_to_see, count) top visited persons, case-insensitive grouping."""
     conn = sqlite3.connect("barangay_visitors.db")
     cur = conn.cursor()
     cur.execute("""
-        SELECT person_to_see, COUNT(*) as cnt FROM visitors
-        WHERE person_to_see IS NOT NULL AND person_to_see != ''
-        GROUP BY person_to_see ORDER BY cnt DESC LIMIT ?
+        SELECT UPPER(TRIM(person_to_see)) as name, COUNT(*) as cnt FROM visitors
+        WHERE person_to_see IS NOT NULL AND TRIM(person_to_see) != ''
+        GROUP BY UPPER(TRIM(person_to_see)) ORDER BY cnt DESC LIMIT ?
     """, (limit,))
-    results = cur.fetchall()
+    results = [(name.title(), cnt) for name, cnt in cur.fetchall()]
     conn.close()
     return results
 
@@ -1498,7 +1500,14 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
 
         def _on_mw(e):
             try:
-                canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+                delta = int(-1*(e.delta/120))
+                # Clamp: don't scroll above top (0.0) or below bottom (1.0)
+                top, bottom = canvas.yview()
+                if delta < 0 and top <= 0.0:
+                    return
+                if delta > 0 and bottom >= 1.0:
+                    return
+                canvas.yview_scroll(delta, "units")
             except Exception:
                 pass
         canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mw))
@@ -1524,7 +1533,7 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         return body
 
     def draw_bar_chart(parent, data, bar_color=A_BLUE, height=220, bg=A_SURFACE,
-                       show_values=True, label_every=1, rotate_labels=False):
+                       show_values=True, label_every=1, rotate_labels=False, initial_zoom=1.0):
         if not data:
             tk.Label(parent, text="No data available.", font=("Segoe UI", 10),
                      bg=bg, fg=A_MUTED).pack(pady=20)
@@ -1533,55 +1542,144 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         values = [d[1] for d in data]
         max_val = max(values) if max(values) > 0 else 1
 
-        c = tk.Canvas(parent, bg=bg, height=height, highlightthickness=0)
-        c.pack(fill="x", pady=(0, 8))
+        # zoom / scroll state
+        state = {"zoom": initial_zoom, "scroll_x": 0}
+        MIN_ZOOM, MAX_ZOOM = 1.0, 8.0
 
-        def _draw(e=None):
+        wrapper = tk.Frame(parent, bg=bg)
+        wrapper.pack(fill="x", pady=(0, 4))
+
+        c = tk.Canvas(wrapper, bg=bg, height=height, highlightthickness=0)
+        c.pack(fill="x", expand=True)
+
+        hbar = tk.Scrollbar(wrapper, orient="horizontal")
+
+        margin_l, margin_r, margin_top, margin_bot = 62, 16, 16, 38
+
+        def _redraw(e=None):
             c.delete("all")
-            w = c.winfo_width()
-            if w < 50:
+            view_w = c.winfo_width()
+            if view_w < 50:
                 return
-            margin_l, margin_r, margin_top, margin_bot = 52, 16, 16, 50 if rotate_labels else 38
-            chart_w = w - margin_l - margin_r
             chart_h = height - margin_top - margin_bot
             n = len(labels)
-            bar_w = max(4, chart_w // n - 4)
-            gap   = max(2, (chart_w - bar_w * n) // (n + 1))
+            zoom = state["zoom"]
+            base_bar_w = max(8, min(60, (view_w - margin_l - margin_r) // max(n, 1) - 4))
+            bar_w = int(base_bar_w * zoom)
+            gap = max(2, int(4 * zoom))
+            total_content_w = n * (bar_w + gap) + gap
+            max_scroll = max(0, total_content_w - (view_w - margin_l - margin_r))
+            state["scroll_x"] = max(0, min(state["scroll_x"], max_scroll))
+            off = state["scroll_x"]
 
+            if zoom > 1.0 and max_scroll > 0:
+                hbar.pack(fill="x")
+                lo = off / total_content_w if total_content_w > 0 else 0
+                hi = lo + (view_w - margin_l - margin_r) / total_content_w
+                hbar.set(lo, min(hi, 1.0))
+            else:
+                hbar.pack_forget()
+
+            # Y-axis grid + labels (draw first, will be covered by mask, then redrawn)
             for step in range(0, 6):
                 y = margin_top + chart_h - int(chart_h * step / 5)
-                val_label = int(max_val * step / 5)
-                c.create_line(margin_l, y, w - margin_r, y, fill=A_BORDER, dash=(4, 4))
-                c.create_text(margin_l - 6, y, text=str(val_label), anchor="e",
-                               fill=A_MUTED, font=("Segoe UI", 7))
+                c.create_line(margin_l, y, view_w, y, fill=A_BORDER, dash=(4, 4))
+
+            # auto-thin labels based on bar width
+            show_every = max(1, int(20 / max(bar_w, 1)))
 
             for i, (lbl, val) in enumerate(zip(labels, values)):
-                x1 = margin_l + gap + i * (bar_w + gap)
-                x2 = x1 + bar_w
+                cx = margin_l + gap + i * (bar_w + gap) - off
+                x1, x2 = cx, cx + bar_w
+                if x2 < margin_l or x1 > view_w:
+                    continue
                 bar_h = int(chart_h * val / max_val) if max_val > 0 else 0
                 y1 = margin_top + chart_h - bar_h
                 y2 = margin_top + chart_h
                 color = bar_color if isinstance(bar_color, str) else bar_color[i % len(bar_color)]
-                c.create_rectangle(x1, y1, x2, y2, fill=color, outline="", width=0)
-                if show_values and val > 0:
+                draw_x1 = max(x1, margin_l)
+                if draw_x1 < x2:
+                    c.create_rectangle(draw_x1, y1, x2, y2, fill=color, outline="", width=0)
+                if show_values and val > 0 and x1 >= margin_l:
                     c.create_text((x1 + x2) // 2, y1 - 5, text=str(val), anchor="s",
-                                   fill=A_TEXT, font=("Segoe UI", 7, "bold"))
-                if i % label_every == 0:
-                    lbl_short = lbl if len(lbl) <= 10 else lbl[:9] + "…"
-                    if rotate_labels:
-                        c.create_text((x1 + x2) // 2, y2 + 6, text=lbl_short,
-                                       anchor="nw", angle=40, fill=A_MUTED, font=("Segoe UI", 7))
-                    else:
-                        c.create_text((x1 + x2) // 2, y2 + 4, text=lbl_short,
-                                       anchor="n", fill=A_MUTED, font=("Segoe UI", 7))
+                                   fill="#222222", font=("Segoe UI", 8, "bold"))
+                mid_x = (x1 + x2) // 2
+                if i % show_every == 0 and mid_x > margin_l:
+                    c.create_text(mid_x, y2 + 5, text=lbl,
+                                   anchor="n", fill="#333333", font=("Segoe UI", 8, "bold"))
 
+            # Left mask to hide bars sliding under Y-axis
+            c.create_rectangle(0, 0, margin_l - 1, height + 4, fill=bg, outline="")
+            # Redraw Y labels on top of mask
+            for step in range(0, 6):
+                y = margin_top + chart_h - int(chart_h * step / 5)
+                val_label = int(max_val * step / 5)
+                c.create_text(margin_l - 6, y, text=str(val_label), anchor="e",
+                               fill="#444444", font=("Segoe UI", 8, "bold"))
+            # Axes
             c.create_line(margin_l, margin_top, margin_l, margin_top + chart_h,
                           fill=A_MUTED, width=1)
-            c.create_line(margin_l, margin_top + chart_h, w - margin_r, margin_top + chart_h,
+            c.create_line(margin_l, margin_top + chart_h, view_w, margin_top + chart_h,
                           fill=A_MUTED, width=1)
 
-        c.bind("<Configure>", _draw)
-        c.after(80, _draw)
+        def _on_hbar_move(cmd, *args):
+            view_w = c.winfo_width()
+            n = len(labels)
+            zoom = state["zoom"]
+            base_bar_w = max(8, min(60, (view_w - margin_l - margin_r) // max(n, 1) - 4))
+            bar_w = int(base_bar_w * zoom)
+            gap = max(2, int(4 * zoom))
+            total_content_w = n * (bar_w + gap) + gap
+            if cmd == "moveto":
+                state["scroll_x"] = float(args[0]) * total_content_w
+            elif cmd == "scroll":
+                state["scroll_x"] += int(args[0]) * 30
+            _redraw()
+
+        hbar.config(command=_on_hbar_move)
+
+        def _on_wheel(event):
+            if event.state & 0x4:  # Ctrl held = zoom
+                factor = 1.15 if event.delta > 0 else (1 / 1.15)
+                new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, state["zoom"] * factor))
+                cursor_chart_x = event.x - margin_l + state["scroll_x"]
+                state["zoom"] = new_zoom
+                state["scroll_x"] = max(0, cursor_chart_x - (event.x - margin_l))
+                _redraw()
+                return "break"
+            else:  # plain scroll = horizontal pan when zoomed
+                if state["zoom"] > 1.0:
+                    state["scroll_x"] += int(-event.delta / 120 * 40)
+                    _redraw()
+                    return "break"
+
+        tk.Label(wrapper, text="Ctrl+Scroll to zoom  •  Scroll to pan horizontally",
+                 font=("Segoe UI", 7), bg=bg, fg=A_MUTED).pack(anchor="e", padx=4)
+
+        _init_done = [False]
+
+        def _on_configure(e=None):
+            _redraw()
+
+        def _initial_draw():
+            if initial_zoom > 1.0:
+                view_w = c.winfo_width()
+                if view_w < 50:
+                    c.after(100, _initial_draw)
+                    return
+                n = len(labels)
+                zoom = state["zoom"]
+                base_bar_w = max(8, min(60, (view_w - margin_l - margin_r) // max(n, 1) - 4))
+                bar_w = int(base_bar_w * zoom)
+                gap = max(2, int(4 * zoom))
+                total_content_w = n * (bar_w + gap) + gap
+                state["scroll_x"] = max(0, total_content_w - (view_w - margin_l - margin_r))
+            _redraw()
+            _init_done[0] = True
+
+        c.bind("<Configure>", _on_configure)
+        c.bind("<MouseWheel>", _on_wheel)
+        c.after(200, _initial_draw)
 
     def stat_pill(parent, label, value, color):
         f = tk.Frame(parent, bg=A_SURFACE2,
@@ -1628,7 +1726,8 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         daily_card = ana_card(parent, "📅 Daily Visitors", "Last 30 days")
         daily_data = analytics_get_daily_counts(30)
         draw_bar_chart(daily_card, daily_data, bar_color=A_BLUE, height=240,
-                       bg=A_SURFACE, label_every=max(1, len(daily_data)//10), rotate_labels=True)
+                       bg=A_SURFACE, label_every=max(1, len(daily_data)//10), rotate_labels=True,
+                       initial_zoom=3.0)
 
         week_card = ana_card(parent, "📆 Weekly Visitors", "Last 12 weeks")
         draw_bar_chart(week_card, analytics_get_weekly_counts(12), bar_color=A_GREEN,
@@ -1758,7 +1857,7 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         if persons:
             chart_card = ana_card(parent, "📊 Visit Count Chart")
             chart_data = [(p[:18] + "…" if len(p) > 18 else p, c) for p, c in persons[:10]]
-            draw_bar_chart(chart_card, chart_data, bar_color=A_PURPLE, height=260,
+            draw_bar_chart(chart_card, chart_data, bar_color=BAR_COLORS, height=260,
                            bg=A_SURFACE, label_every=1, rotate_labels=True)
 
         tk.Frame(parent, bg=A_BG, height=30).pack()
@@ -1850,26 +1949,6 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
              bg=C_RED_DARK, fg=C_WHITE).pack(side="left", padx=16, fill="y")
 
     tk.Frame(main_frame, bg=C_GOLD, height=3).pack(fill="x")
-
-    # ── STATS BAR ────────────────────────────────────────────
-    stats_bar = tk.Frame(main_frame, bg=C_RED_MID, height=44)
-    stats_bar.pack(fill="x")
-    stats_bar.pack_propagate(False)
-
-    stats_inner = tk.Frame(stats_bar, bg=C_RED_MID)
-    stats_inner.pack(side="left", padx=20, fill="y")
-
-    today_label = tk.Label(stats_inner,
-                           text=f"📊  Today's Visitors: {count_today()}",
-                           font=("Segoe UI", 9, "bold"), bg=C_RED_MID, fg=C_WHITE)
-    today_label.pack(side="left", padx=(0, 20))
-
-    tk.Frame(stats_inner, bg=C_RED_ACCENT, width=1).pack(side="left", fill="y", pady=10)
-
-    total_label = tk.Label(stats_inner,
-                           text=f"  📋  Total Records: {count_all()}",
-                           font=("Segoe UI", 9, "bold"), bg=C_RED_MID, fg=C_WHITE)
-    total_label.pack(side="left", padx=20)
 
     # ── SEARCH + ACTIONS BAR ─────────────────────────────────
     toolbar = tk.Frame(main_frame, bg=C_OFF_WHITE, pady=10)
@@ -2325,7 +2404,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                             highlightbackground=C_BORDER, highlightthickness=1)
     table_outer.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
-    columns = ("ID", "Full Name", "Contact", "Address", "Purpose", "Date", "Time")
+    columns = ("ID", "Full Name", "Contact", "Address", "Purpose", "Person to See", "Date", "Time")
 
     style2 = ttk.Style()
     style2.theme_use("clam")
@@ -2357,7 +2436,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                         style="Modern.Treeview")
 
     widths = {"ID": 45, "Full Name": 160, "Contact": 120,
-              "Address": 185, "Purpose": 150, "Date": 95, "Time": 65}
+              "Address": 185, "Purpose": 150, "Person to See": 140, "Date": 95, "Time": 65}
     for col in columns:
         tree.heading(col, text=col)
         tree.column(col, width=widths[col],
@@ -2368,9 +2447,11 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     tree.tag_configure("even", background=C_WHITE)
 
     scrollbar = ttk.Scrollbar(table_outer, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=scrollbar.set)
-    tree.pack(side="left", fill="both", expand=True)
+    h_scrollbar = ttk.Scrollbar(table_outer, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=h_scrollbar.set)
     scrollbar.pack(side="right", fill="y")
+    h_scrollbar.pack(side="bottom", fill="x")
+    tree.pack(side="left", fill="both", expand=True)
 
     def load_table():
         for row in tree.get_children():
@@ -2379,8 +2460,6 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         for i, row in enumerate(rows):
             tree.insert("", "end", values=row, tags=("even" if i % 2 == 0 else "odd",))
         record_count_var.set(f"{len(rows)} record(s)")
-        today_label.config(text=f"📊  Today's Visitors: {count_today()}")
-        total_label.config(text=f"  📋  Total Records: {count_all()}")
 
     search_var.trace("w", lambda *_: load_table())
     load_table()
