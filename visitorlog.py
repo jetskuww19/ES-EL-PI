@@ -6,6 +6,23 @@ import re
 import os
 import sys
 
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.lib import colors
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 # ============================================================
 #  COLOR PALETTE  –  Modern red/white theme matching screenshot
 # ============================================================
@@ -1922,6 +1939,188 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         conn.close()
         return rows
 
+    def export_to_excel(filename, rows, date_range):
+        """Export records to Excel file"""
+        if not OPENPYXL_AVAILABLE:
+            messagebox.showerror("Error", "openpyxl library not installed. Please install it with: pip install openpyxl")
+            return False
+        
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Visitor Records"
+            
+            # Style definitions
+            header_fill = PatternFill(start_color="8B0000", end_color="8B0000", fill_type="solid")
+            header_font = Font(name="Times New Roman", bold=True, color="FFFFFF", size=11)
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # Add title - Barangay name first
+            ws['A1'] = "BARANGAY SAN ANDRES"
+            ws['A1'].font = Font(name="Times New Roman", bold=True, size=15)
+            ws.merge_cells('A1:G1')
+            ws['A1'].alignment = Alignment(horizontal="center")
+            
+            # Add records title
+            ws['A2'] = f"Visitor Records ({date_range})"
+            ws['A2'].font = Font(name="Times New Roman", bold=True, size=14)
+            ws.merge_cells('A2:G2')
+            ws['A2'].alignment = Alignment(horizontal="center")
+            
+            # Add export date
+            ws['A3'] = f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            ws.merge_cells('A3:G3')
+            ws['A3'].font = Font(name="Times New Roman", italic=True, size=15)
+            
+            # Add headers
+            headers = ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Date', 'Time']
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws.cell(row=5, column=col_idx)
+                cell.value = header
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = header_alignment
+                cell.border = border
+            
+            # Add data rows
+            for row_idx, row_data in enumerate(rows, start=6):
+                id_, name, contact, address, purpose, vdate, vtime = row_data
+                row_values = [id_, name, contact, address, purpose, vdate, vtime]
+                for col_idx, value in enumerate(row_values, start=1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.value = value
+                    cell.font = Font(name="Times New Roman", size=12)
+                    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                    cell.border = border
+            
+            # Adjust column widths
+            ws.column_dimensions['A'].width = 6
+            ws.column_dimensions['B'].width = 20
+            ws.column_dimensions['C'].width = 15
+            ws.column_dimensions['D'].width = 25
+            ws.column_dimensions['E'].width = 20
+            ws.column_dimensions['F'].width = 12
+            ws.column_dimensions['G'].width = 12
+            
+            ws.row_dimensions[1].height = 20
+            ws.row_dimensions[2].height = 20
+            ws.row_dimensions[5].height = 30
+            
+            wb.save(filename)
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export to Excel: {str(e)}")
+            return False
+
+    def export_to_pdf(filename, rows, date_range):
+        """Export records to PDF file"""
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror("Error", "reportlab library not installed. Please install it with: pip install reportlab")
+            return False
+        
+        try:
+            doc = SimpleDocTemplate(filename, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+            story = []
+            
+            # Barangay name
+            styles = getSampleStyleSheet()
+            barangay_style = ParagraphStyle(
+                'BarangayTitle',
+                parent=styles['Heading1'],
+                fontSize=14,
+                textColor=colors.HexColor("#8B0000"),
+                spaceAfter=3,
+                alignment=1,
+                fontName='Times-Roman'
+            )
+            story.append(Paragraph("BARANGAY SAN ANDRES", barangay_style))
+            
+            # Title
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=12,
+                textColor=colors.HexColor("#8B0000"),
+                spaceAfter=6,
+                alignment=1,
+                fontName='Times-Roman'
+            )
+            story.append(Paragraph(f"Visitor Records ({date_range})", title_style))
+            
+            # Export date
+            export_style = ParagraphStyle(
+                'ExportDate',
+                parent=styles['Normal'],
+                fontSize=9,
+                textColor=colors.grey,
+                spaceAfter=12,
+                alignment=1,
+                fontName='Times-Roman'
+            )
+            story.append(Paragraph(f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", export_style))
+            
+            # Prepare table data with wrapped text
+            cell_style = ParagraphStyle(
+                'CellStyle',
+                parent=styles['Normal'],
+                fontSize=15,
+                alignment=0,  # LEFT alignment
+                fontName='Times-Roman'
+            )
+            header_cell_style = ParagraphStyle(
+                'HeaderCellStyle',
+                parent=styles['Normal'],
+                fontSize=10,
+                textColor=colors.whitesmoke,
+                alignment=0,
+                fontName='Times-Bold'
+            )
+            
+            table_data = [[Paragraph(h, header_cell_style) for h in ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Date', 'Time']]]
+            for row in rows:
+                id_, name, contact, address, purpose, vdate, vtime = row
+                wrapped_row = [
+                    Paragraph(str(id_), cell_style),
+                    Paragraph(str(name), cell_style),
+                    Paragraph(str(contact), cell_style),
+                    Paragraph(str(address), cell_style),
+                    Paragraph(str(purpose), cell_style),
+                    Paragraph(str(vdate), cell_style),
+                    Paragraph(str(vtime), cell_style)
+                ]
+                table_data.append(wrapped_row)
+            
+            # Create table with styling
+            table = Table(table_data, colWidths=[0.5*inch, 1.3*inch, 1*inch, 1.4*inch, 1.2*inch, 0.9*inch, 0.7*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#8B0000")),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
+                ('VALIGN', (0, 1), (-1, -1), 'TOP'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#FFE8E8")]),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('TOPPADDING', (0, 1), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                ('LEFTPADDING', (0, 1), (-1, -1), 5),
+                ('RIGHTPADDING', (0, 1), (-1, -1), 5),
+            ]))
+            
+            story.append(table)
+            doc.build(story)
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export to PDF: {str(e)}")
+            return False
+
     def export_records():
         s = start_date_var.get().strip()
         e = end_date_var.get().strip()
@@ -1951,21 +2150,129 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         if not rows:
             messagebox.showinfo("No Records", f"No records found for {rng}."); return
 
-        parts = [f"Visitor Records ({rng})\nExported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"]
-        for r in rows:
-            id_, name, contact, address, purpose, vdate, vtime = r
-            parts.append(f"ID: {id_}\nName: {name}\nContact: {contact}\nAddress: {address}\nPurpose: {purpose}\nDate: {vdate}\nTime: {vtime}\n---\n")
+        # Show format selection dialog
+        format_window = tk.Toplevel(root)
+        format_window.title("Export Format")
+        format_window.geometry("380x320")
+        format_window.resizable(False, False)
+        format_window.transient(root)
+        format_window.grab_set()
+        format_window.configure(bg=C_OFF_WHITE)
+        
+        # Center window
+        format_window.update_idletasks()
+        x = root.winfo_x() + (root.winfo_width() - format_window.winfo_width()) // 2
+        y = root.winfo_y() + (root.winfo_height() - format_window.winfo_height()) // 2
+        format_window.geometry(f"+{x}+{y}")
+        
+        # Main frame
+        main_frame = tk.Frame(format_window, bg=C_OFF_WHITE)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Title
+        tk.Label(main_frame, text="Choose Export Format", 
+                 font=("Segoe UI", 14, "bold"), 
+                 bg=C_OFF_WHITE, fg=C_TEXT_DARK).pack(pady=(0, 15))
+        
+        # Format selection
+        selected_format = tk.StringVar(value="xlsx")
+        
+        # Excel button
+        excel_frame = tk.Frame(main_frame, bg=C_WHITE, highlightbackground=C_BORDER, 
+                               highlightthickness=1, cursor="hand2")
+        excel_frame.pack(fill="x", pady=5)
+        
+        def select_excel():
+            selected_format.set("xlsx")
+            excel_frame.config(highlightbackground=C_RED_DARK, highlightthickness=2)
+            pdf_frame.config(highlightbackground=C_BORDER, highlightthickness=1)
+        
+        # Excel icon (use xls.png)
+        excel_icon = load_icon_image_file("xls.png", 18)
+        rb_text = "  Excel (.xlsx)"
+        if excel_icon:
+            tk.Radiobutton(excel_frame, text=rb_text, image=excel_icon, compound="left",
+                           variable=selected_format, value="xlsx", font=("Segoe UI", 11),
+                           bg=C_WHITE, fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_excel).pack(anchor="w", padx=10, pady=10)
+            excel_frame._icon_ref = excel_icon
+        else:
+            tk.Radiobutton(excel_frame, text="📊 Excel (.xlsx)", variable=selected_format,
+                           value="xlsx", font=("Segoe UI", 11), bg=C_WHITE,
+                           fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_excel).pack(anchor="w", padx=10, pady=10)
+        
+        # PDF button
+        pdf_frame = tk.Frame(main_frame, bg=C_WHITE, highlightbackground=C_BORDER, 
+                             highlightthickness=1, cursor="hand2")
+        pdf_frame.pack(fill="x", pady=5)
+        
+        def select_pdf():
+            selected_format.set("pdf")
+            pdf_frame.config(highlightbackground=C_RED_DARK, highlightthickness=2)
+            excel_frame.config(highlightbackground=C_BORDER, highlightthickness=1)
+        
+        # PDF icon (use pdf.png)
+        pdf_icon = load_icon_image_file("pdf.png", 18)
+        rb_text_pdf = "  PDF (.pdf)"
+        if pdf_icon:
+            tk.Radiobutton(pdf_frame, text=rb_text_pdf, image=pdf_icon, compound="left",
+                           variable=selected_format, value="pdf", font=("Segoe UI", 11),
+                           bg=C_WHITE, fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_pdf).pack(anchor="w", padx=10, pady=10)
+            pdf_frame._icon_ref = pdf_icon
+        else:
+            tk.Radiobutton(pdf_frame, text="📄 PDF (.pdf)", variable=selected_format,
+                           value="pdf", font=("Segoe UI", 11), bg=C_WHITE,
+                           fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_pdf).pack(anchor="w", padx=10, pady=10)
+        
+        # Set Excel as default selection
+        select_excel()
+        
+        # Buttons frame (center buttons)
+        button_frame = tk.Frame(main_frame, bg=C_OFF_WHITE)
+        button_frame.pack(fill="x", pady=(20, 0))
 
-        fn = filedialog.asksaveasfilename(parent=root, defaultextension=".txt",
-                                          filetypes=[("Text files", "*.txt")],
-                                          title="Save records as...")
-        if not fn: return
-        try:
-            with open(fn, "w", encoding="utf-8") as f:
-                f.write("\n".join(parts))
-            messagebox.showinfo("Saved", f"Records saved to:\n{fn}")
-        except Exception as err:
-            messagebox.showerror("Error", str(err))
+        # center_frame holds the buttons and is packed centered horizontally
+        center_frame = tk.Frame(button_frame, bg=C_OFF_WHITE)
+        center_frame.pack(anchor='center')
+        
+        def proceed_export():
+            fmt = selected_format.get()
+            format_window.destroy()
+            
+            # File extension and type mapping
+            ext_map = {"xlsx": ".xlsx", "pdf": ".pdf"}
+            type_map = {
+                "xlsx": [("Excel files", "*.xlsx")],
+                "pdf": [("PDF files", "*.pdf")]
+            }
+            
+            fn = filedialog.asksaveasfilename(parent=root, 
+                                              defaultextension=ext_map[fmt],
+                                              filetypes=type_map[fmt],
+                                              title="Save records as...")
+            if not fn: return
+            
+            success = False
+            if fmt == "xlsx":
+                success = export_to_excel(fn, rows, rng)
+            elif fmt == "pdf":
+                success = export_to_pdf(fn, rows, rng)
+            
+            if success:
+                messagebox.showinfo("Saved", f"Records saved to:\n{fn}")
+        
+        export_btn = RoundedButton(center_frame, text="✓  Export", bg=C_RED_DARK,
+                       activebackground=C_RED_MID, min_width=100,
+                       command=proceed_export)
+        export_btn.pack(side="left", padx=10)
+        
+        cancel_btn = RoundedButton(center_frame, text="✕  Cancel", bg="#999999",
+                       activebackground="#777777", min_width=100,
+                       command=format_window.destroy)
+        cancel_btn.pack(side="left", padx=10)
 
     dl_btn = RoundedButton(action_group, text="⬇  Export Records",
                             bg=C_GREEN,
