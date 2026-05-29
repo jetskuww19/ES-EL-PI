@@ -1952,7 +1952,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             
             # Style definitions
             header_fill = PatternFill(start_color="8B0000", end_color="8B0000", fill_type="solid")
-            header_font = Font(name="Times New Roman", bold=True, color="FFFFFF", size=11)
+            header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             border = Border(
                 left=Side(style='thin'),
@@ -1963,23 +1963,24 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             
             # Add title - Barangay name first
             ws['A1'] = "BARANGAY SAN ANDRES"
-            ws['A1'].font = Font(name="Times New Roman", bold=True, size=15)
-            ws.merge_cells('A1:G1')
+            ws['A1'].font = Font(name="Arial", bold=True, size=15)
+            ws.merge_cells('A1:H1')
             ws['A1'].alignment = Alignment(horizontal="center")
             
             # Add records title
             ws['A2'] = f"Visitor Records ({date_range})"
-            ws['A2'].font = Font(name="Times New Roman", bold=True, size=14)
-            ws.merge_cells('A2:G2')
+            ws['A2'].font = Font(name="Arial", bold=True, size=14)
+            ws.merge_cells('A2:H2')
             ws['A2'].alignment = Alignment(horizontal="center")
             
             # Add export date
             ws['A3'] = f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            ws.merge_cells('A3:G3')
-            ws['A3'].font = Font(name="Times New Roman", italic=True, size=15)
+            ws.merge_cells('A3:H3')
+            ws['A3'].font = Font(name="Arial", italic=True, size=11)
+            ws['A3'].alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
             
             # Add headers
-            headers = ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Date', 'Time']
+            headers = ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Person to See', 'Date', 'Time']
             for col_idx, header in enumerate(headers, start=1):
                 cell = ws.cell(row=5, column=col_idx)
                 cell.value = header
@@ -1990,27 +1991,46 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             
             # Add data rows
             for row_idx, row_data in enumerate(rows, start=6):
-                id_, name, contact, address, purpose, vdate, vtime = row_data
-                row_values = [id_, name, contact, address, purpose, vdate, vtime]
+                id_, name, contact, address, purpose, person_to_see, vdate, vtime = row_data
+                row_values = [id_, name, contact, address, purpose, person_to_see or "", vdate, vtime]
                 for col_idx, value in enumerate(row_values, start=1):
                     cell = ws.cell(row=row_idx, column=col_idx)
                     cell.value = value
-                    cell.font = Font(name="Times New Roman", size=12)
+                    cell.font = Font(name="Arial", size=12)
                     cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
                     cell.border = border
             
-            # Adjust column widths
-            ws.column_dimensions['A'].width = 6
-            ws.column_dimensions['B'].width = 20
-            ws.column_dimensions['C'].width = 15
-            ws.column_dimensions['D'].width = 25
-            ws.column_dimensions['E'].width = 20
-            ws.column_dimensions['F'].width = 12
-            ws.column_dimensions['G'].width = 12
+            # Adjust column widths for printing
+            ws.column_dimensions['A'].width = 5
+            ws.column_dimensions['B'].width = 18
+            ws.column_dimensions['C'].width = 14
+            ws.column_dimensions['D'].width = 18
+            ws.column_dimensions['E'].width = 14
+            ws.column_dimensions['F'].width = 14
+            ws.column_dimensions['G'].width = 13
+            ws.column_dimensions['H'].width = 12
             
             ws.row_dimensions[1].height = 20
             ws.row_dimensions[2].height = 20
-            ws.row_dimensions[5].height = 30
+            ws.row_dimensions[3].height = 16
+            ws.row_dimensions[5].height = 25
+            
+            # Set print options to fit all content on page
+            ws.print_options.horizontalCentered = False
+            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+            ws.page_margins.left = 0.5
+            ws.page_margins.right = 0.5
+            ws.page_margins.top = 0.5
+            ws.page_margins.bottom = 0.5
+            
+            # Fit all columns to one page width when printing
+            ws.page_setup.fitToPage = True
+            ws.page_setup.fitToHeight = 0
+            ws.page_setup.fitToWidth = 1
+            
+            # Set print area to include all data
+            max_row = 5 + len(rows)
+            ws.print_area = f'A1:H{max_row}'
             
             wb.save(filename)
             return True
@@ -2025,7 +2045,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             return False
         
         try:
-            doc = SimpleDocTemplate(filename, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+            doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
             story = []
             
             # Barangay name
@@ -2065,53 +2085,65 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             )
             story.append(Paragraph(f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", export_style))
             
-            # Prepare table data with wrapped text
-            cell_style = ParagraphStyle(
-                'CellStyle',
-                parent=styles['Normal'],
-                fontSize=15,
-                alignment=0,  # LEFT alignment
-                fontName='Times-Roman'
-            )
+            # Prepare table data with wrapping paragraphs for long cell content
             header_cell_style = ParagraphStyle(
                 'HeaderCellStyle',
                 parent=styles['Normal'],
                 fontSize=10,
                 textColor=colors.whitesmoke,
                 alignment=0,
-                fontName='Times-Bold'
+                fontName='Times-Bold',
+                spaceBefore=0,
+                spaceAfter=0,
+                leading=12,
+                wordWrap='CJK'
+            )
+            data_cell_style = ParagraphStyle(
+                'DataCellStyle',
+                parent=styles['Normal'],
+                fontSize=8,
+                textColor=colors.black,
+                alignment=0,
+                fontName='Times-Roman',
+                spaceBefore=0,
+                spaceAfter=0,
+                leading=10,
+                wordWrap='CJK'
             )
             
-            table_data = [[Paragraph(h, header_cell_style) for h in ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Date', 'Time']]]
+            table_data = [[Paragraph(h, header_cell_style) for h in ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Person to See', 'Date', 'Time']]]
             for row in rows:
-                id_, name, contact, address, purpose, vdate, vtime = row
-                wrapped_row = [
-                    Paragraph(str(id_), cell_style),
-                    Paragraph(str(name), cell_style),
-                    Paragraph(str(contact), cell_style),
-                    Paragraph(str(address), cell_style),
-                    Paragraph(str(purpose), cell_style),
-                    Paragraph(str(vdate), cell_style),
-                    Paragraph(str(vtime), cell_style)
+                id_, name, contact, address, purpose, person_to_see, vdate, vtime = row
+                row_data = [
+                    Paragraph(str(id_), data_cell_style),
+                    Paragraph(str(name), data_cell_style),
+                    Paragraph(str(contact), data_cell_style),
+                    Paragraph(str(address), data_cell_style),
+                    Paragraph(str(purpose), data_cell_style),
+                    Paragraph(str(person_to_see or ""), data_cell_style),
+                    Paragraph(str(vdate), data_cell_style),
+                    Paragraph(str(vtime), data_cell_style),
                 ]
-                table_data.append(wrapped_row)
+                table_data.append(row_data)
             
-            # Create table with styling
-            table = Table(table_data, colWidths=[0.5*inch, 1.3*inch, 1*inch, 1.4*inch, 1.2*inch, 0.9*inch, 0.7*inch])
+            table = Table(table_data, colWidths=[0.35*inch, 1.3*inch, 0.9*inch, 1.8*inch, 1.4*inch, 1.4*inch, 0.9*inch, 0.7*inch])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#8B0000")),
                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
                 ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
                 ('VALIGN', (0, 1), (-1, -1), 'TOP'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Times-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('FONTNAME', (0, 1), (-1, -1), 'Times-Roman'),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
                 ('GRID', (0, 0), (-1, -1), 1, colors.black),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#FFE8E8")]),
-                ('FONTSIZE', (0, 1), (-1, -1), 9),
-                ('TOPPADDING', (0, 1), (-1, -1), 6),
-                ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
-                ('LEFTPADDING', (0, 1), (-1, -1), 5),
-                ('RIGHTPADDING', (0, 1), (-1, -1), 5),
+                ('TOPPADDING', (0, 1), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
             ]))
             
             story.append(table)
@@ -2130,16 +2162,16 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             messagebox.showerror("Error", "End date must be YYYY-MM-DD."); return
 
         if s and e:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors WHERE visit_date BETWEEN ? AND ? ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors WHERE visit_date BETWEEN ? AND ? ORDER BY visit_date, visit_time"
             p, rng = (s, e), f"{s} to {e}"
         elif s:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors WHERE visit_date >= ? ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors WHERE visit_date >= ? ORDER BY visit_date, visit_time"
             p, rng = (s,), f"from {s}"
         elif e:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors WHERE visit_date <= ? ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors WHERE visit_date <= ? ORDER BY visit_date, visit_time"
             p, rng = (e,), f"up to {e}"
         else:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors ORDER BY visit_date, visit_time"
             p, rng = (), "all records"
 
         try:
