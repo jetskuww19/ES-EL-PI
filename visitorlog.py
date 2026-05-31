@@ -5,6 +5,7 @@ from datetime import datetime
 import re
 import os
 import sys
+import shutil
 
 try:
     from openpyxl import Workbook
@@ -47,11 +48,149 @@ C_LABEL       = "#5A1A1A"
 C_GREEN       = "#006633"
 
 # ============================================================
+#  BACKUP SYSTEM  –  Offline only (AppData\Local)
+# ============================================================
+
+# Base folder in AppData\Local\BarangayVisitorLog — always writable on any PC
+APP_DATA_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "BarangayVisitorLog"
+)
+BACKUP_DIR    = os.path.join(APP_DATA_DIR, "backups")
+DB_PATH       = os.path.join(APP_DATA_DIR, "barangay_visitors.db")
+MAX_BACKUPS   = 7
+BACKUP_INTERVAL_MS = 3 * 60 * 60 * 1000   # check every 3 hours
+_last_backup_time = None   # track when we last backed up
+
+# Make sure the folder exists right away
+os.makedirs(APP_DATA_DIR, exist_ok=True)
+
+
+def get_backup_dir():
+    """Return the backup folder path, creating it if needed."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    return BACKUP_DIR
+
+
+def auto_backup_database(silent=True):
+    """
+    Copy barangay_visitors.db into AppData\\Local\\BarangayVisitorLog\\backups\\
+    with a timestamp filename.  Keeps only the MAX_BACKUPS most-recent files.
+    Returns (success: bool, message: str).
+    """
+    if not os.path.exists(DB_PATH):
+        return False, "Database file not found – nothing to back up."
+
+    try:
+        backup_dir = get_backup_dir()
+        timestamp  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_name = f"barangay_visitors_backup_{timestamp}.db"
+        backup_path = os.path.join(backup_dir, backup_name)
+
+        shutil.copy2(DB_PATH, backup_path)
+
+        # Prune old backups – keep only the newest MAX_BACKUPS
+        all_backups = sorted(
+            [f for f in os.listdir(backup_dir) if f.endswith(".db")],
+            reverse=True
+        )
+        for old in all_backups[MAX_BACKUPS:]:
+            try:
+                os.remove(os.path.join(backup_dir, old))
+            except Exception:
+                pass
+
+        msg = f"Backup saved:\n{backup_path}"
+        if not silent:
+            messagebox.showinfo("Backup Successful", msg)
+        return True, msg
+
+    except Exception as e:
+        msg = f"Backup failed: {e}"
+        if not silent:
+            messagebox.showerror("Backup Failed", msg)
+        return False, msg
+
+
+def _get_db_row_count():
+    """Return current number of visitor rows, or -1 if DB doesn't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        count = conn.execute('SELECT COUNT(*) FROM visitors').fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return -1
+
+
+def schedule_auto_backup(root):
+    """
+    Every 3 hours, only backs up if the visitor count changed since last backup.
+    Keeps the backup folder from piling up with identical files.
+    """
+    global _last_backup_time
+    current_count = _get_db_row_count()
+    if current_count != _last_backup_time:  # _last_backup_time stores last backed-up row count
+        ok, _ = auto_backup_database(silent=True)
+        if ok:
+            _last_backup_time = current_count
+    root.after(BACKUP_INTERVAL_MS, lambda: schedule_auto_backup(root))
+
+
+def get_backup_list():
+    """Return a list of (filename, full_path, size_kb, modified_str) for all backups."""
+    backup_dir = get_backup_dir()
+    results = []
+    try:
+        files = sorted(
+            [f for f in os.listdir(backup_dir) if f.endswith(".db")],
+            reverse=True
+        )
+        for f in files:
+            full = os.path.join(backup_dir, f)
+            size_kb = os.path.getsize(full) / 1024
+            modified = datetime.fromtimestamp(os.path.getmtime(full)).strftime("%Y-%m-%d  %I:%M %p")
+            results.append((f, full, size_kb, modified))
+    except Exception:
+        pass
+    return results
+
+
+def restore_backup(backup_path, parent=None):
+    """Overwrite the live DB with a chosen backup after confirmation."""
+    if not os.path.exists(backup_path):
+        messagebox.showerror("Error", "Backup file not found.", parent=parent)
+        return False
+    confirmed = messagebox.askyesno(
+        "Restore Backup",
+        "This will REPLACE the current database with the selected backup.\n\n"
+        "A safety copy of the current database will be saved first.\n\n"
+        "Continue?",
+        parent=parent
+    )
+    if not confirmed:
+        return False
+    # Save current DB as safety copy first
+    auto_backup_database(silent=True)
+    try:
+        shutil.copy2(backup_path, DB_PATH)
+        messagebox.showinfo("Restore Successful",
+                            "Database restored successfully!\n"
+                            "Please restart the application.",
+                            parent=parent)
+        return True
+    except Exception as e:
+        messagebox.showerror("Restore Failed", f"Could not restore backup:\n{e}", parent=parent)
+        return False
+
+
+# ============================================================
 #  DATABASE FUNCTIONS
 # ============================================================
 
 def create_database():
-    connection = sqlite3.connect("barangay_visitors.db")
+    auto_backup_database(silent=True)   # backup on every app launch
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
@@ -75,7 +214,7 @@ def create_database():
     connection.close()
 
 def insert_visitor(full_name, contact, address, purpose, visit_date, visit_time, person_to_see=""):
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     person_to_see = person_to_see.strip().title() if person_to_see else ""
     cursor.execute("""
@@ -86,7 +225,7 @@ def insert_visitor(full_name, contact, address, purpose, visit_date, visit_time,
     connection.close()
 
 def get_all_visitors(search=""):
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     base = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors"
     if search:
@@ -100,7 +239,7 @@ def get_all_visitors(search=""):
     return results
 
 def update_visitor(visitor_id, full_name, contact, address, purpose, visit_date, visit_time, person_to_see=""):
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     person_to_see = person_to_see.strip().title() if person_to_see else ""
     cursor.execute("""
@@ -110,7 +249,7 @@ def update_visitor(visitor_id, full_name, contact, address, purpose, visit_date,
     connection.close()
 
 def count_today():
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("SELECT COUNT(*) FROM visitors WHERE visit_date=?", (today,))
@@ -119,7 +258,7 @@ def count_today():
     return total
 
 def count_all():
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("SELECT COUNT(*) FROM visitors")
     total = cursor.fetchone()[0]
@@ -150,7 +289,7 @@ def is_valid_time(time_text):
 #  ADMIN PASSWORD
 # ============================================================
 
-ADMIN_PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "admin_password.txt")
+ADMIN_PASSWORD_FILE = os.path.join(APP_DATA_DIR, "admin_password.txt")
 
 def get_admin_password():
     try:
@@ -1284,7 +1423,7 @@ def try_admin_login(root, main_frame, sidebar_nav=None):
 def analytics_get_daily_counts(days=30):
     """Returns list of (date_str, count) for the last `days` days."""
     from datetime import timedelta
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     today = datetime.now().date()
@@ -1298,7 +1437,7 @@ def analytics_get_daily_counts(days=30):
 def analytics_get_weekly_counts(weeks=12):
     """Returns list of (week_label, count) for the last `weeks` weeks."""
     from datetime import timedelta
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     today = datetime.now().date()
@@ -1316,7 +1455,7 @@ def analytics_get_monthly_counts(months=12):
     """Returns list of (month_label, count) for the last `months` months."""
     from datetime import timedelta
     import calendar
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     today = datetime.now()
@@ -1337,7 +1476,7 @@ def analytics_get_monthly_counts(months=12):
 
 def analytics_get_purpose_counts():
     """Returns dict of purpose -> count."""
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     purposes = [
         "Business / Transaction",
@@ -1362,7 +1501,7 @@ def analytics_get_purpose_counts():
 
 def analytics_get_hourly_counts():
     """Returns list of (hour_label, count) for hours 0-23."""
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     for h in range(24):
@@ -1375,7 +1514,7 @@ def analytics_get_hourly_counts():
 
 def analytics_get_top_persons(limit=10):
     """Returns list of (person_to_see, count) top visited persons, case-insensitive grouping."""
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
         SELECT UPPER(TRIM(person_to_see)) as name, COUNT(*) as cnt FROM visitors
@@ -1702,7 +1841,7 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         week_start  = (datetime.now().date() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
         month_start = datetime.now().strftime("%Y-%m-01")
 
-        conn = sqlite3.connect("barangay_visitors.db")
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date=?", (today_str,))
         today_cnt = cur.fetchone()[0]
@@ -2011,7 +2150,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
              relief="flat", bd=0).pack(ipady=5, padx=8)
 
     def _run_query(query, params=()):
-        conn = sqlite3.connect("barangay_visitors.db")
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute(query, params)
         rows = cur.fetchall()
@@ -2655,6 +2794,99 @@ def show_settings_screen(root, main_frame, sidebar_nav=None):
         tk.Label(dev, text=line, font=("Segoe UI", 9),
                  bg=DK_SURFACE, fg=DK_TEXT, anchor="w").pack(fill="x", pady=1)
 
+    # ── Backup Management card ───────────────────────────────
+    bk = dk_card(body_inner,
+                 title="💾  Database Backup",
+                 subtitle="Automatic offline backup to AppData\\Local\\BarangayVisitorLog\\backups")
+
+    # Backup path display
+    path_row = tk.Frame(bk, bg=DK_SURFACE)
+    path_row.pack(fill="x", pady=(0, 10))
+    tk.Label(path_row, text="📂  Backup Folder:",
+             font=("Segoe UI", 9, "bold"), bg=DK_SURFACE, fg=DK_MUTED,
+             width=18, anchor="w").pack(side="left")
+    tk.Label(path_row, text=BACKUP_DIR,
+             font=("Segoe UI", 8), bg=DK_SURFACE, fg=DK_TEXT,
+             wraplength=480, justify="left").pack(side="left")
+
+    # Status label
+    status_var = tk.StringVar(value="")
+    status_lbl = tk.Label(bk, textvariable=status_var,
+                          font=("Segoe UI", 8, "italic"),
+                          bg=DK_SURFACE, fg=C_GREEN, anchor="w")
+    status_lbl.pack(fill="x", pady=(0, 10))
+
+    # Buttons row
+    btn_row = tk.Frame(bk, bg=DK_SURFACE)
+    btn_row.pack(fill="x", pady=(0, 14))
+
+    def do_manual_backup():
+        ok, msg = auto_backup_database(silent=True)
+        status_var.set("✔ " + msg.split("\n")[0] if ok else "✘ " + msg)
+        status_lbl.config(fg=C_GREEN if ok else C_RED_ACCENT)
+        refresh_backup_list()
+
+    manual_btn = RoundedButton(btn_row, text="💾  Backup Now",
+                               bg=C_RED_ACCENT, activebackground=C_RED_DARK,
+                               min_width=160, command=do_manual_backup)
+    manual_btn.pack(side="left", padx=(0, 10))
+
+    def open_backup_folder():
+        folder = get_backup_dir()
+        try:
+            os.startfile(folder)
+        except Exception:
+            import subprocess
+            subprocess.Popen(["xdg-open", folder])
+
+    open_btn = RoundedButton(btn_row, text="📂  Open Folder",
+                             bg=DK_RED, activebackground=C_RED_DARK,
+                             min_width=160, command=open_backup_folder)
+    open_btn.pack(side="left")
+
+    # ── Backup list ──────────────────────────────────────────
+    tk.Frame(bk, bg=DK_BORDER, height=1).pack(fill="x", pady=(6, 12))
+    tk.Label(bk, text="Recent Backups  (max 7 kept)",
+             font=("Segoe UI", 9, "bold"), bg=DK_SURFACE, fg=DK_TEXT).pack(anchor="w", pady=(0, 6))
+
+    list_frame = tk.Frame(bk, bg=DK_SURFACE)
+    list_frame.pack(fill="x")
+
+    backup_rows = []   # keep refs
+
+    def refresh_backup_list():
+        for w in list_frame.winfo_children():
+            w.destroy()
+        backup_rows.clear()
+        backups = get_backup_list()
+        if not backups:
+            tk.Label(list_frame, text="No backups found yet.",
+                     font=("Segoe UI", 8, "italic"),
+                     bg=DK_SURFACE, fg=DK_MUTED).pack(anchor="w")
+            return
+        for i, (fname, fpath, size_kb, modified) in enumerate(backups):
+            row_bg = DK_SURFACE if i % 2 == 0 else DK_SURFACE2
+            row = tk.Frame(list_frame, bg=row_bg, pady=4)
+            row.pack(fill="x")
+
+            info_col = tk.Frame(row, bg=row_bg)
+            info_col.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+            tk.Label(info_col, text=f"  {modified}",
+                     font=("Segoe UI", 8, "bold"), bg=row_bg, fg=DK_TEXT).pack(anchor="w")
+            tk.Label(info_col, text=f"  {fname}   ({size_kb:.1f} KB)",
+                     font=("Segoe UI", 7), bg=row_bg, fg=DK_MUTED).pack(anchor="w")
+
+            restore_btn = RoundedButton(row, text="Restore",
+                                        bg=C_RED_DARK, activebackground=C_RED_ACCENT,
+                                        font=("Segoe UI", 8, "bold"),
+                                        min_width=80,
+                                        command=lambda p=fpath: restore_backup(p, parent=root))
+            restore_btn.pack(side="right", padx=8)
+            backup_rows.append(row)
+
+    refresh_backup_list()
+
     # Spacer at bottom
     tk.Frame(body_inner, bg=DK_BG, height=40).pack()
 
@@ -2679,10 +2911,27 @@ def main():
     root.minsize(900, 560)
     root.configure(bg=C_OFF_WHITE)
     configure_button_styles()
+
+    # Set window icon (taskbar + title bar)
+    try:
+        icon_ico = resource_path(os.path.join("icon", "logo.ico"))
+        icon_png = resource_path(os.path.join("logo", "logo.png"))
+        if os.path.exists(icon_ico):
+            root.iconbitmap(icon_ico)
+        elif os.path.exists(icon_png):
+            from PIL import Image, ImageTk
+            _ico_img = ImageTk.PhotoImage(Image.open(icon_png).resize((32, 32)))
+            root.iconphoto(True, _ico_img)
+    except Exception:
+        pass
+
     try:
         root.state('zoomed')
     except Exception:
         pass
+
+    # Start periodic auto-backup (every 3 hours, only if DB changed)
+    schedule_auto_backup(root)  # runs immediately, then reschedules itself every 3 hours
 
     # ── SIDEBAR ──────────────────────────────────────────────
     sidebar = tk.Frame(root, bg=C_SIDEBAR_BG, width=210)
