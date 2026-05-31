@@ -2124,7 +2124,8 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             return False
         
         try:
-            doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
+            from reportlab.lib.pagesizes import landscape, A4
+            doc = SimpleDocTemplate(filename, pagesize=landscape(A4), topMargin=0.5*inch, bottomMargin=0.5*inch)
             story = []
             
             # Barangay name
