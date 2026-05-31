@@ -5,6 +5,24 @@ from datetime import datetime
 import re
 import os
 import sys
+import shutil
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.lib import colors
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
 # ============================================================
 #  COLOR PALETTE  –  Modern red/white theme matching screenshot
@@ -30,11 +48,149 @@ C_LABEL       = "#5A1A1A"
 C_GREEN       = "#006633"
 
 # ============================================================
+#  BACKUP SYSTEM  –  Offline only (AppData\Local)
+# ============================================================
+
+# Base folder in AppData\Local\BarangayVisitorLog — always writable on any PC
+APP_DATA_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "BarangayVisitorLog"
+)
+BACKUP_DIR    = os.path.join(APP_DATA_DIR, "backups")
+DB_PATH       = os.path.join(APP_DATA_DIR, "barangay_visitors.db")
+MAX_BACKUPS   = 7
+BACKUP_INTERVAL_MS = 3 * 60 * 60 * 1000   # check every 3 hours
+_last_backup_time = None   # track when we last backed up
+
+# Make sure the folder exists right away
+os.makedirs(APP_DATA_DIR, exist_ok=True)
+
+
+def get_backup_dir():
+    """Return the backup folder path, creating it if needed."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    return BACKUP_DIR
+
+
+def auto_backup_database(silent=True):
+    """
+    Copy barangay_visitors.db into AppData\\Local\\BarangayVisitorLog\\backups\\
+    with a timestamp filename.  Keeps only the MAX_BACKUPS most-recent files.
+    Returns (success: bool, message: str).
+    """
+    if not os.path.exists(DB_PATH):
+        return False, "Database file not found – nothing to back up."
+
+    try:
+        backup_dir = get_backup_dir()
+        timestamp  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_name = f"barangay_visitors_backup_{timestamp}.db"
+        backup_path = os.path.join(backup_dir, backup_name)
+
+        shutil.copy2(DB_PATH, backup_path)
+
+        # Prune old backups – keep only the newest MAX_BACKUPS
+        all_backups = sorted(
+            [f for f in os.listdir(backup_dir) if f.endswith(".db")],
+            reverse=True
+        )
+        for old in all_backups[MAX_BACKUPS:]:
+            try:
+                os.remove(os.path.join(backup_dir, old))
+            except Exception:
+                pass
+
+        msg = f"Backup saved:\n{backup_path}"
+        if not silent:
+            messagebox.showinfo("Backup Successful", msg)
+        return True, msg
+
+    except Exception as e:
+        msg = f"Backup failed: {e}"
+        if not silent:
+            messagebox.showerror("Backup Failed", msg)
+        return False, msg
+
+
+def _get_db_row_count():
+    """Return current number of visitor rows, or -1 if DB doesn't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        count = conn.execute('SELECT COUNT(*) FROM visitors').fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return -1
+
+
+def schedule_auto_backup(root):
+    """
+    Every 3 hours, only backs up if the visitor count changed since last backup.
+    Keeps the backup folder from piling up with identical files.
+    """
+    global _last_backup_time
+    current_count = _get_db_row_count()
+    if current_count != _last_backup_time:  # _last_backup_time stores last backed-up row count
+        ok, _ = auto_backup_database(silent=True)
+        if ok:
+            _last_backup_time = current_count
+    root.after(BACKUP_INTERVAL_MS, lambda: schedule_auto_backup(root))
+
+
+def get_backup_list():
+    """Return a list of (filename, full_path, size_kb, modified_str) for all backups."""
+    backup_dir = get_backup_dir()
+    results = []
+    try:
+        files = sorted(
+            [f for f in os.listdir(backup_dir) if f.endswith(".db")],
+            reverse=True
+        )
+        for f in files:
+            full = os.path.join(backup_dir, f)
+            size_kb = os.path.getsize(full) / 1024
+            modified = datetime.fromtimestamp(os.path.getmtime(full)).strftime("%Y-%m-%d  %I:%M %p")
+            results.append((f, full, size_kb, modified))
+    except Exception:
+        pass
+    return results
+
+
+def restore_backup(backup_path, parent=None):
+    """Overwrite the live DB with a chosen backup after confirmation."""
+    if not os.path.exists(backup_path):
+        messagebox.showerror("Error", "Backup file not found.", parent=parent)
+        return False
+    confirmed = messagebox.askyesno(
+        "Restore Backup",
+        "This will REPLACE the current database with the selected backup.\n\n"
+        "A safety copy of the current database will be saved first.\n\n"
+        "Continue?",
+        parent=parent
+    )
+    if not confirmed:
+        return False
+    # Save current DB as safety copy first
+    auto_backup_database(silent=True)
+    try:
+        shutil.copy2(backup_path, DB_PATH)
+        messagebox.showinfo("Restore Successful",
+                            "Database restored successfully!\n"
+                            "Please restart the application.",
+                            parent=parent)
+        return True
+    except Exception as e:
+        messagebox.showerror("Restore Failed", f"Could not restore backup:\n{e}", parent=parent)
+        return False
+
+
+# ============================================================
 #  DATABASE FUNCTIONS
 # ============================================================
 
 def create_database():
-    connection = sqlite3.connect("barangay_visitors.db")
+    auto_backup_database(silent=True)   # backup on every app launch
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
@@ -58,8 +214,9 @@ def create_database():
     connection.close()
 
 def insert_visitor(full_name, contact, address, purpose, visit_date, visit_time, person_to_see=""):
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
+    person_to_see = person_to_see.strip().title() if person_to_see else ""
     cursor.execute("""
         INSERT INTO visitors (full_name, contact, address, purpose, visit_date, visit_time, person_to_see)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -68,9 +225,9 @@ def insert_visitor(full_name, contact, address, purpose, visit_date, visit_time,
     connection.close()
 
 def get_all_visitors(search=""):
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
-    base = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors"
+    base = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors"
     if search:
         like = "%" + search + "%"
         cursor.execute(base + " WHERE full_name LIKE ? OR contact LIKE ? OR purpose LIKE ? OR address LIKE ? ORDER BY id DESC",
@@ -82,8 +239,9 @@ def get_all_visitors(search=""):
     return results
 
 def update_visitor(visitor_id, full_name, contact, address, purpose, visit_date, visit_time, person_to_see=""):
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
+    person_to_see = person_to_see.strip().title() if person_to_see else ""
     cursor.execute("""
         UPDATE visitors SET full_name=?, contact=?, address=?, purpose=?, visit_date=?, visit_time=?, person_to_see=? WHERE id=?
     """, (full_name, contact, address, purpose, visit_date, visit_time, person_to_see, visitor_id))
@@ -91,7 +249,7 @@ def update_visitor(visitor_id, full_name, contact, address, purpose, visit_date,
     connection.close()
 
 def count_today():
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("SELECT COUNT(*) FROM visitors WHERE visit_date=?", (today,))
@@ -100,7 +258,7 @@ def count_today():
     return total
 
 def count_all():
-    connection = sqlite3.connect("barangay_visitors.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("SELECT COUNT(*) FROM visitors")
     total = cursor.fetchone()[0]
@@ -122,8 +280,8 @@ def is_valid_date(date_text):
 
 def is_valid_time(time_text):
     try:
-        if not re.match(r"^\d{2}:\d{2}$", time_text): return False
-        datetime.strptime(time_text, "%H:%M"); return True
+        if not re.match(r"^\d{1,2}:\d{2}\s(AM|PM)$", time_text, re.IGNORECASE): return False
+        datetime.strptime(time_text, "%I:%M %p"); return True
     except ValueError:
         return False
 
@@ -131,7 +289,7 @@ def is_valid_time(time_text):
 #  ADMIN PASSWORD
 # ============================================================
 
-ADMIN_PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "admin_password.txt")
+ADMIN_PASSWORD_FILE = os.path.join(APP_DATA_DIR, "admin_password.txt")
 
 def get_admin_password():
     try:
@@ -760,7 +918,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     content_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
     # ── CARD — draw rounded rect directly on content_canvas for true transparent corners ──
-    CARD_W = 500
+    CARD_W = 700
     CARD_MIN_H = 570
     CARD_RADIUS = 24
 
@@ -822,7 +980,9 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             return None
         try:
             from PIL import Image, ImageTk
-            img = Image.open(path).resize((size, size), Image.LANCZOS)
+            img = Image.open(path)
+            # Use thumbnail to maintain aspect ratio while fitting within size x size box
+            img.thumbnail((size, size), Image.LANCZOS)
             return ImageTk.PhotoImage(img)
         except Exception:
             try:
@@ -830,8 +990,8 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             except Exception:
                 return None
 
-    logo1 = _load_logo(os.path.join(logo_dir, "logo.png"), 112)
-    logo2 = _load_logo(os.path.join(logo_dir, "sk.png"), 90)
+    logo1 = _load_logo(os.path.join(logo_dir, "stgo.png"), 112)
+    logo2 = _load_logo(os.path.join(logo_dir, "logo.png"), 112)
     _card_logos[0], _card_logos[1] = logo1, logo2
 
     left_logo_lbl = tk.Label(header_frame, bg=C_WHITE)
@@ -902,7 +1062,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
     other_purpose_var = tk.StringVar()
     
     date_var          = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-    time_var          = tk.StringVar(value=datetime.now().strftime("%H:%M"))
+    time_var          = tk.StringVar(value=datetime.now().strftime("%I:%M %p"))
     person_var        = tk.StringVar()
     
     # Register form variables to sync with the sidebar clock
@@ -1244,7 +1404,7 @@ def show_user_screen(root, main_frame, sidebar_nav=None):
             person_var.set("")
             other_row.pack_forget()
             date_var.set(datetime.now().strftime("%Y-%m-%d"))
-            time_var.set(datetime.now().strftime("%H:%M"))
+            time_var.set(datetime.now().strftime("%I:%M %p"))
         except Exception as error:
             messagebox.showerror("Error", str(error))
 
@@ -1263,7 +1423,7 @@ def try_admin_login(root, main_frame, sidebar_nav=None):
 def analytics_get_daily_counts(days=30):
     """Returns list of (date_str, count) for the last `days` days."""
     from datetime import timedelta
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     today = datetime.now().date()
@@ -1277,7 +1437,7 @@ def analytics_get_daily_counts(days=30):
 def analytics_get_weekly_counts(weeks=12):
     """Returns list of (week_label, count) for the last `weeks` weeks."""
     from datetime import timedelta
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     today = datetime.now().date()
@@ -1295,7 +1455,7 @@ def analytics_get_monthly_counts(months=12):
     """Returns list of (month_label, count) for the last `months` months."""
     from datetime import timedelta
     import calendar
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     today = datetime.now()
@@ -1316,7 +1476,7 @@ def analytics_get_monthly_counts(months=12):
 
 def analytics_get_purpose_counts():
     """Returns dict of purpose -> count."""
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     purposes = [
         "Business / Transaction",
@@ -1341,7 +1501,7 @@ def analytics_get_purpose_counts():
 
 def analytics_get_hourly_counts():
     """Returns list of (hour_label, count) for hours 0-23."""
-    conn = sqlite3.connect("barangay_visitors.db")
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     results = []
     for h in range(24):
@@ -1353,15 +1513,15 @@ def analytics_get_hourly_counts():
     return results
 
 def analytics_get_top_persons(limit=10):
-    """Returns list of (person_to_see, count) top visited persons."""
-    conn = sqlite3.connect("barangay_visitors.db")
+    """Returns list of (person_to_see, count) top visited persons, case-insensitive grouping."""
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        SELECT person_to_see, COUNT(*) as cnt FROM visitors
-        WHERE person_to_see IS NOT NULL AND person_to_see != ''
-        GROUP BY person_to_see ORDER BY cnt DESC LIMIT ?
+        SELECT UPPER(TRIM(person_to_see)) as name, COUNT(*) as cnt FROM visitors
+        WHERE person_to_see IS NOT NULL AND TRIM(person_to_see) != ''
+        GROUP BY UPPER(TRIM(person_to_see)) ORDER BY cnt DESC LIMIT ?
     """, (limit,))
-    results = cur.fetchall()
+    results = [(name.title(), cnt) for name, cnt in cur.fetchall()]
     conn.close()
     return results
 
@@ -1479,7 +1639,14 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
 
         def _on_mw(e):
             try:
-                canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+                delta = int(-1*(e.delta/120))
+                # Clamp: don't scroll above top (0.0) or below bottom (1.0)
+                top, bottom = canvas.yview()
+                if delta < 0 and top <= 0.0:
+                    return
+                if delta > 0 and bottom >= 1.0:
+                    return
+                canvas.yview_scroll(delta, "units")
             except Exception:
                 pass
         canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mw))
@@ -1505,7 +1672,7 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         return body
 
     def draw_bar_chart(parent, data, bar_color=A_BLUE, height=220, bg=A_SURFACE,
-                       show_values=True, label_every=1, rotate_labels=False):
+                       show_values=True, label_every=1, rotate_labels=False, initial_zoom=1.0):
         if not data:
             tk.Label(parent, text="No data available.", font=("Segoe UI", 10),
                      bg=bg, fg=A_MUTED).pack(pady=20)
@@ -1514,55 +1681,144 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         values = [d[1] for d in data]
         max_val = max(values) if max(values) > 0 else 1
 
-        c = tk.Canvas(parent, bg=bg, height=height, highlightthickness=0)
-        c.pack(fill="x", pady=(0, 8))
+        # zoom / scroll state
+        state = {"zoom": initial_zoom, "scroll_x": 0}
+        MIN_ZOOM, MAX_ZOOM = 1.0, 8.0
 
-        def _draw(e=None):
+        wrapper = tk.Frame(parent, bg=bg)
+        wrapper.pack(fill="x", pady=(0, 4))
+
+        c = tk.Canvas(wrapper, bg=bg, height=height, highlightthickness=0)
+        c.pack(fill="x", expand=True)
+
+        hbar = tk.Scrollbar(wrapper, orient="horizontal")
+
+        margin_l, margin_r, margin_top, margin_bot = 62, 16, 16, 38
+
+        def _redraw(e=None):
             c.delete("all")
-            w = c.winfo_width()
-            if w < 50:
+            view_w = c.winfo_width()
+            if view_w < 50:
                 return
-            margin_l, margin_r, margin_top, margin_bot = 52, 16, 16, 50 if rotate_labels else 38
-            chart_w = w - margin_l - margin_r
             chart_h = height - margin_top - margin_bot
             n = len(labels)
-            bar_w = max(4, chart_w // n - 4)
-            gap   = max(2, (chart_w - bar_w * n) // (n + 1))
+            zoom = state["zoom"]
+            base_bar_w = max(8, min(60, (view_w - margin_l - margin_r) // max(n, 1) - 4))
+            bar_w = int(base_bar_w * zoom)
+            gap = max(2, int(4 * zoom))
+            total_content_w = n * (bar_w + gap) + gap
+            max_scroll = max(0, total_content_w - (view_w - margin_l - margin_r))
+            state["scroll_x"] = max(0, min(state["scroll_x"], max_scroll))
+            off = state["scroll_x"]
 
+            if zoom > 1.0 and max_scroll > 0:
+                hbar.pack(fill="x")
+                lo = off / total_content_w if total_content_w > 0 else 0
+                hi = lo + (view_w - margin_l - margin_r) / total_content_w
+                hbar.set(lo, min(hi, 1.0))
+            else:
+                hbar.pack_forget()
+
+            # Y-axis grid + labels (draw first, will be covered by mask, then redrawn)
             for step in range(0, 6):
                 y = margin_top + chart_h - int(chart_h * step / 5)
-                val_label = int(max_val * step / 5)
-                c.create_line(margin_l, y, w - margin_r, y, fill=A_BORDER, dash=(4, 4))
-                c.create_text(margin_l - 6, y, text=str(val_label), anchor="e",
-                               fill=A_MUTED, font=("Segoe UI", 7))
+                c.create_line(margin_l, y, view_w, y, fill=A_BORDER, dash=(4, 4))
+
+            # auto-thin labels based on bar width
+            show_every = max(1, int(20 / max(bar_w, 1)))
 
             for i, (lbl, val) in enumerate(zip(labels, values)):
-                x1 = margin_l + gap + i * (bar_w + gap)
-                x2 = x1 + bar_w
+                cx = margin_l + gap + i * (bar_w + gap) - off
+                x1, x2 = cx, cx + bar_w
+                if x2 < margin_l or x1 > view_w:
+                    continue
                 bar_h = int(chart_h * val / max_val) if max_val > 0 else 0
                 y1 = margin_top + chart_h - bar_h
                 y2 = margin_top + chart_h
                 color = bar_color if isinstance(bar_color, str) else bar_color[i % len(bar_color)]
-                c.create_rectangle(x1, y1, x2, y2, fill=color, outline="", width=0)
-                if show_values and val > 0:
+                draw_x1 = max(x1, margin_l)
+                if draw_x1 < x2:
+                    c.create_rectangle(draw_x1, y1, x2, y2, fill=color, outline="", width=0)
+                if show_values and val > 0 and x1 >= margin_l:
                     c.create_text((x1 + x2) // 2, y1 - 5, text=str(val), anchor="s",
-                                   fill=A_TEXT, font=("Segoe UI", 7, "bold"))
-                if i % label_every == 0:
-                    lbl_short = lbl if len(lbl) <= 10 else lbl[:9] + "…"
-                    if rotate_labels:
-                        c.create_text((x1 + x2) // 2, y2 + 6, text=lbl_short,
-                                       anchor="nw", angle=40, fill=A_MUTED, font=("Segoe UI", 7))
-                    else:
-                        c.create_text((x1 + x2) // 2, y2 + 4, text=lbl_short,
-                                       anchor="n", fill=A_MUTED, font=("Segoe UI", 7))
+                                   fill="#222222", font=("Segoe UI", 8, "bold"))
+                mid_x = (x1 + x2) // 2
+                if i % show_every == 0 and mid_x > margin_l:
+                    c.create_text(mid_x, y2 + 5, text=lbl,
+                                   anchor="n", fill="#333333", font=("Segoe UI", 8, "bold"))
 
+            # Left mask to hide bars sliding under Y-axis
+            c.create_rectangle(0, 0, margin_l - 1, height + 4, fill=bg, outline="")
+            # Redraw Y labels on top of mask
+            for step in range(0, 6):
+                y = margin_top + chart_h - int(chart_h * step / 5)
+                val_label = int(max_val * step / 5)
+                c.create_text(margin_l - 6, y, text=str(val_label), anchor="e",
+                               fill="#444444", font=("Segoe UI", 8, "bold"))
+            # Axes
             c.create_line(margin_l, margin_top, margin_l, margin_top + chart_h,
                           fill=A_MUTED, width=1)
-            c.create_line(margin_l, margin_top + chart_h, w - margin_r, margin_top + chart_h,
+            c.create_line(margin_l, margin_top + chart_h, view_w, margin_top + chart_h,
                           fill=A_MUTED, width=1)
 
-        c.bind("<Configure>", _draw)
-        c.after(80, _draw)
+        def _on_hbar_move(cmd, *args):
+            view_w = c.winfo_width()
+            n = len(labels)
+            zoom = state["zoom"]
+            base_bar_w = max(8, min(60, (view_w - margin_l - margin_r) // max(n, 1) - 4))
+            bar_w = int(base_bar_w * zoom)
+            gap = max(2, int(4 * zoom))
+            total_content_w = n * (bar_w + gap) + gap
+            if cmd == "moveto":
+                state["scroll_x"] = float(args[0]) * total_content_w
+            elif cmd == "scroll":
+                state["scroll_x"] += int(args[0]) * 30
+            _redraw()
+
+        hbar.config(command=_on_hbar_move)
+
+        def _on_wheel(event):
+            if event.state & 0x4:  # Ctrl held = zoom
+                factor = 1.15 if event.delta > 0 else (1 / 1.15)
+                new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, state["zoom"] * factor))
+                cursor_chart_x = event.x - margin_l + state["scroll_x"]
+                state["zoom"] = new_zoom
+                state["scroll_x"] = max(0, cursor_chart_x - (event.x - margin_l))
+                _redraw()
+                return "break"
+            else:  # plain scroll = horizontal pan when zoomed
+                if state["zoom"] > 1.0:
+                    state["scroll_x"] += int(-event.delta / 120 * 40)
+                    _redraw()
+                    return "break"
+
+        tk.Label(wrapper, text="Ctrl+Scroll to zoom  •  Scroll to pan horizontally",
+                 font=("Segoe UI", 7), bg=bg, fg=A_MUTED).pack(anchor="e", padx=4)
+
+        _init_done = [False]
+
+        def _on_configure(e=None):
+            _redraw()
+
+        def _initial_draw():
+            if initial_zoom > 1.0:
+                view_w = c.winfo_width()
+                if view_w < 50:
+                    c.after(100, _initial_draw)
+                    return
+                n = len(labels)
+                zoom = state["zoom"]
+                base_bar_w = max(8, min(60, (view_w - margin_l - margin_r) // max(n, 1) - 4))
+                bar_w = int(base_bar_w * zoom)
+                gap = max(2, int(4 * zoom))
+                total_content_w = n * (bar_w + gap) + gap
+                state["scroll_x"] = max(0, total_content_w - (view_w - margin_l - margin_r))
+            _redraw()
+            _init_done[0] = True
+
+        c.bind("<Configure>", _on_configure)
+        c.bind("<MouseWheel>", _on_wheel)
+        c.after(200, _initial_draw)
 
     def stat_pill(parent, label, value, color):
         f = tk.Frame(parent, bg=A_SURFACE2,
@@ -1585,7 +1841,7 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         week_start  = (datetime.now().date() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
         month_start = datetime.now().strftime("%Y-%m-01")
 
-        conn = sqlite3.connect("barangay_visitors.db")
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM visitors WHERE visit_date=?", (today_str,))
         today_cnt = cur.fetchone()[0]
@@ -1609,7 +1865,8 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         daily_card = ana_card(parent, "📅 Daily Visitors", "Last 30 days")
         daily_data = analytics_get_daily_counts(30)
         draw_bar_chart(daily_card, daily_data, bar_color=A_BLUE, height=240,
-                       bg=A_SURFACE, label_every=max(1, len(daily_data)//10), rotate_labels=True)
+                       bg=A_SURFACE, label_every=max(1, len(daily_data)//10), rotate_labels=True,
+                       initial_zoom=3.0)
 
         week_card = ana_card(parent, "📆 Weekly Visitors", "Last 12 weeks")
         draw_bar_chart(week_card, analytics_get_weekly_counts(12), bar_color=A_GREEN,
@@ -1739,7 +1996,7 @@ def show_analytics_screen(root, main_frame, sidebar_nav=None):
         if persons:
             chart_card = ana_card(parent, "📊 Visit Count Chart")
             chart_data = [(p[:18] + "…" if len(p) > 18 else p, c) for p, c in persons[:10]]
-            draw_bar_chart(chart_card, chart_data, bar_color=A_PURPLE, height=260,
+            draw_bar_chart(chart_card, chart_data, bar_color=BAR_COLORS, height=260,
                            bg=A_SURFACE, label_every=1, rotate_labels=True)
 
         tk.Frame(parent, bg=A_BG, height=30).pack()
@@ -1832,26 +2089,6 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
 
     tk.Frame(main_frame, bg=C_GOLD, height=3).pack(fill="x")
 
-    # ── STATS BAR ────────────────────────────────────────────
-    stats_bar = tk.Frame(main_frame, bg=C_RED_MID, height=44)
-    stats_bar.pack(fill="x")
-    stats_bar.pack_propagate(False)
-
-    stats_inner = tk.Frame(stats_bar, bg=C_RED_MID)
-    stats_inner.pack(side="left", padx=20, fill="y")
-
-    today_label = tk.Label(stats_inner,
-                           text=f"📊  Today's Visitors: {count_today()}",
-                           font=("Segoe UI", 9, "bold"), bg=C_RED_MID, fg=C_WHITE)
-    today_label.pack(side="left", padx=(0, 20))
-
-    tk.Frame(stats_inner, bg=C_RED_ACCENT, width=1).pack(side="left", fill="y", pady=10)
-
-    total_label = tk.Label(stats_inner,
-                           text=f"  📋  Total Records: {count_all()}",
-                           font=("Segoe UI", 9, "bold"), bg=C_RED_MID, fg=C_WHITE)
-    total_label.pack(side="left", padx=20)
-
     # ── SEARCH + ACTIONS BAR ─────────────────────────────────
     toolbar = tk.Frame(main_frame, bg=C_OFF_WHITE, pady=10)
     toolbar.pack(fill="x", padx=16)
@@ -1913,12 +2150,227 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
              relief="flat", bd=0).pack(ipady=5, padx=8)
 
     def _run_query(query, params=()):
-        conn = sqlite3.connect("barangay_visitors.db")
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute(query, params)
         rows = cur.fetchall()
         conn.close()
         return rows
+
+    def export_to_excel(filename, rows, date_range):
+        """Export records to Excel file"""
+        if not OPENPYXL_AVAILABLE:
+            messagebox.showerror("Error", "openpyxl library not installed. Please install it with: pip install openpyxl")
+            return False
+        
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Visitor Records"
+            
+            # Style definitions
+            header_fill = PatternFill(start_color="8B0000", end_color="8B0000", fill_type="solid")
+            header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # Add title - Barangay name first
+            ws['A1'] = "BARANGAY SAN ANDRES"
+            ws['A1'].font = Font(name="Arial", bold=True, size=15)
+            ws.merge_cells('A1:H1')
+            ws['A1'].alignment = Alignment(horizontal="center")
+            
+            # Add records title
+            ws['A2'] = f"Visitor Records ({date_range})"
+            ws['A2'].font = Font(name="Arial", bold=True, size=14)
+            ws.merge_cells('A2:H2')
+            ws['A2'].alignment = Alignment(horizontal="center")
+            
+            # Add export date
+            ws['A3'] = f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            ws.merge_cells('A3:H3')
+            ws['A3'].font = Font(name="Arial", italic=True, size=11)
+            ws['A3'].alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+            
+            # Add headers
+            headers = ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Person to See', 'Date', 'Time']
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws.cell(row=5, column=col_idx)
+                cell.value = header
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = header_alignment
+                cell.border = border
+            
+            # Add data rows
+            for row_idx, row_data in enumerate(rows, start=6):
+                id_, name, contact, address, purpose, person_to_see, vdate, vtime = row_data
+                row_values = [id_, name, contact, address, purpose, person_to_see or "", vdate, vtime]
+                for col_idx, value in enumerate(row_values, start=1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.value = value
+                    cell.font = Font(name="Arial", size=12)
+                    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                    cell.border = border
+            
+            # Adjust column widths for printing
+            ws.column_dimensions['A'].width = 5
+            ws.column_dimensions['B'].width = 18
+            ws.column_dimensions['C'].width = 14
+            ws.column_dimensions['D'].width = 18
+            ws.column_dimensions['E'].width = 14
+            ws.column_dimensions['F'].width = 14
+            ws.column_dimensions['G'].width = 13
+            ws.column_dimensions['H'].width = 12
+            
+            ws.row_dimensions[1].height = 20
+            ws.row_dimensions[2].height = 20
+            ws.row_dimensions[3].height = 16
+            ws.row_dimensions[5].height = 25
+            
+            # Set print options to fit all content on page
+            ws.print_options.horizontalCentered = False
+            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+            ws.page_margins.left = 0.5
+            ws.page_margins.right = 0.5
+            ws.page_margins.top = 0.5
+            ws.page_margins.bottom = 0.5
+            
+            # Fit all columns to one page width when printing
+            ws.page_setup.fitToPage = True
+            ws.page_setup.fitToHeight = 0
+            ws.page_setup.fitToWidth = 1
+            
+            # Set print area to include all data
+            max_row = 5 + len(rows)
+            ws.print_area = f'A1:H{max_row}'
+            
+            wb.save(filename)
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export to Excel: {str(e)}")
+            return False
+
+    def export_to_pdf(filename, rows, date_range):
+        """Export records to PDF file"""
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror("Error", "reportlab library not installed. Please install it with: pip install reportlab")
+            return False
+        
+        try:
+            from reportlab.lib.pagesizes import landscape, A4
+            doc = SimpleDocTemplate(filename, pagesize=landscape(A4), topMargin=0.5*inch, bottomMargin=0.5*inch)
+            story = []
+            
+            # Barangay name
+            styles = getSampleStyleSheet()
+            barangay_style = ParagraphStyle(
+                'BarangayTitle',
+                parent=styles['Heading1'],
+                fontSize=14,
+                textColor=colors.HexColor("#8B0000"),
+                spaceAfter=3,
+                alignment=1,
+                fontName='Times-Roman'
+            )
+            story.append(Paragraph("BARANGAY SAN ANDRES", barangay_style))
+            
+            # Title
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=12,
+                textColor=colors.HexColor("#8B0000"),
+                spaceAfter=6,
+                alignment=1,
+                fontName='Times-Roman'
+            )
+            story.append(Paragraph(f"Visitor Records ({date_range})", title_style))
+            
+            # Export date
+            export_style = ParagraphStyle(
+                'ExportDate',
+                parent=styles['Normal'],
+                fontSize=9,
+                textColor=colors.grey,
+                spaceAfter=12,
+                alignment=1,
+                fontName='Times-Roman'
+            )
+            story.append(Paragraph(f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", export_style))
+            
+            # Prepare table data with wrapping paragraphs for long cell content
+            header_cell_style = ParagraphStyle(
+                'HeaderCellStyle',
+                parent=styles['Normal'],
+                fontSize=10,
+                textColor=colors.whitesmoke,
+                alignment=0,
+                fontName='Times-Bold',
+                spaceBefore=0,
+                spaceAfter=0,
+                leading=12,
+                wordWrap='CJK'
+            )
+            data_cell_style = ParagraphStyle(
+                'DataCellStyle',
+                parent=styles['Normal'],
+                fontSize=8,
+                textColor=colors.black,
+                alignment=0,
+                fontName='Times-Roman',
+                spaceBefore=0,
+                spaceAfter=0,
+                leading=10,
+                wordWrap='CJK'
+            )
+            
+            table_data = [[Paragraph(h, header_cell_style) for h in ['ID', 'Full Name', 'Contact', 'Address', 'Purpose', 'Person to See', 'Date', 'Time']]]
+            for row in rows:
+                id_, name, contact, address, purpose, person_to_see, vdate, vtime = row
+                row_data = [
+                    Paragraph(str(id_), data_cell_style),
+                    Paragraph(str(name), data_cell_style),
+                    Paragraph(str(contact), data_cell_style),
+                    Paragraph(str(address), data_cell_style),
+                    Paragraph(str(purpose), data_cell_style),
+                    Paragraph(str(person_to_see or ""), data_cell_style),
+                    Paragraph(str(vdate), data_cell_style),
+                    Paragraph(str(vtime), data_cell_style),
+                ]
+                table_data.append(row_data)
+            
+            table = Table(table_data, colWidths=[0.35*inch, 1.3*inch, 0.9*inch, 1.8*inch, 1.4*inch, 1.4*inch, 0.9*inch, 0.7*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#8B0000")),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
+                ('VALIGN', (0, 1), (-1, -1), 'TOP'),
+                ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Times-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('FONTNAME', (0, 1), (-1, -1), 'Times-Roman'),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#FFE8E8")]),
+                ('TOPPADDING', (0, 1), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            
+            story.append(table)
+            doc.build(story)
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export to PDF: {str(e)}")
+            return False
 
     def export_records():
         s = start_date_var.get().strip()
@@ -1929,16 +2381,16 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
             messagebox.showerror("Error", "End date must be YYYY-MM-DD."); return
 
         if s and e:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors WHERE visit_date BETWEEN ? AND ? ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors WHERE visit_date BETWEEN ? AND ? ORDER BY visit_date, visit_time"
             p, rng = (s, e), f"{s} to {e}"
         elif s:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors WHERE visit_date >= ? ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors WHERE visit_date >= ? ORDER BY visit_date, visit_time"
             p, rng = (s,), f"from {s}"
         elif e:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors WHERE visit_date <= ? ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors WHERE visit_date <= ? ORDER BY visit_date, visit_time"
             p, rng = (e,), f"up to {e}"
         else:
-            q = "SELECT id, full_name, contact, address, purpose, visit_date, visit_time FROM visitors ORDER BY visit_date, visit_time"
+            q = "SELECT id, full_name, contact, address, purpose, person_to_see, visit_date, visit_time FROM visitors ORDER BY visit_date, visit_time"
             p, rng = (), "all records"
 
         try:
@@ -1949,21 +2401,129 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         if not rows:
             messagebox.showinfo("No Records", f"No records found for {rng}."); return
 
-        parts = [f"Visitor Records ({rng})\nExported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"]
-        for r in rows:
-            id_, name, contact, address, purpose, vdate, vtime = r
-            parts.append(f"ID: {id_}\nName: {name}\nContact: {contact}\nAddress: {address}\nPurpose: {purpose}\nDate: {vdate}\nTime: {vtime}\n---\n")
+        # Show format selection dialog
+        format_window = tk.Toplevel(root)
+        format_window.title("Export Format")
+        format_window.geometry("380x320")
+        format_window.resizable(False, False)
+        format_window.transient(root)
+        format_window.grab_set()
+        format_window.configure(bg=C_OFF_WHITE)
+        
+        # Center window
+        format_window.update_idletasks()
+        x = root.winfo_x() + (root.winfo_width() - format_window.winfo_width()) // 2
+        y = root.winfo_y() + (root.winfo_height() - format_window.winfo_height()) // 2
+        format_window.geometry(f"+{x}+{y}")
+        
+        # Main frame
+        main_frame = tk.Frame(format_window, bg=C_OFF_WHITE)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Title
+        tk.Label(main_frame, text="Choose Export Format", 
+                 font=("Segoe UI", 14, "bold"), 
+                 bg=C_OFF_WHITE, fg=C_TEXT_DARK).pack(pady=(0, 15))
+        
+        # Format selection
+        selected_format = tk.StringVar(value="xlsx")
+        
+        # Excel button
+        excel_frame = tk.Frame(main_frame, bg=C_WHITE, highlightbackground=C_BORDER, 
+                               highlightthickness=1, cursor="hand2")
+        excel_frame.pack(fill="x", pady=5)
+        
+        def select_excel():
+            selected_format.set("xlsx")
+            excel_frame.config(highlightbackground=C_RED_DARK, highlightthickness=2)
+            pdf_frame.config(highlightbackground=C_BORDER, highlightthickness=1)
+        
+        # Excel icon (use xls.png)
+        excel_icon = load_icon_image_file("xls.png", 18)
+        rb_text = "  Excel (.xlsx)"
+        if excel_icon:
+            tk.Radiobutton(excel_frame, text=rb_text, image=excel_icon, compound="left",
+                           variable=selected_format, value="xlsx", font=("Segoe UI", 11),
+                           bg=C_WHITE, fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_excel).pack(anchor="w", padx=10, pady=10)
+            excel_frame._icon_ref = excel_icon
+        else:
+            tk.Radiobutton(excel_frame, text="📊 Excel (.xlsx)", variable=selected_format,
+                           value="xlsx", font=("Segoe UI", 11), bg=C_WHITE,
+                           fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_excel).pack(anchor="w", padx=10, pady=10)
+        
+        # PDF button
+        pdf_frame = tk.Frame(main_frame, bg=C_WHITE, highlightbackground=C_BORDER, 
+                             highlightthickness=1, cursor="hand2")
+        pdf_frame.pack(fill="x", pady=5)
+        
+        def select_pdf():
+            selected_format.set("pdf")
+            pdf_frame.config(highlightbackground=C_RED_DARK, highlightthickness=2)
+            excel_frame.config(highlightbackground=C_BORDER, highlightthickness=1)
+        
+        # PDF icon (use pdf.png)
+        pdf_icon = load_icon_image_file("pdf.png", 18)
+        rb_text_pdf = "  PDF (.pdf)"
+        if pdf_icon:
+            tk.Radiobutton(pdf_frame, text=rb_text_pdf, image=pdf_icon, compound="left",
+                           variable=selected_format, value="pdf", font=("Segoe UI", 11),
+                           bg=C_WHITE, fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_pdf).pack(anchor="w", padx=10, pady=10)
+            pdf_frame._icon_ref = pdf_icon
+        else:
+            tk.Radiobutton(pdf_frame, text="📄 PDF (.pdf)", variable=selected_format,
+                           value="pdf", font=("Segoe UI", 11), bg=C_WHITE,
+                           fg=C_TEXT_DARK, selectcolor=C_RED_LIGHT,
+                           command=select_pdf).pack(anchor="w", padx=10, pady=10)
+        
+        # Set Excel as default selection
+        select_excel()
+        
+        # Buttons frame (center buttons)
+        button_frame = tk.Frame(main_frame, bg=C_OFF_WHITE)
+        button_frame.pack(fill="x", pady=(20, 0))
 
-        fn = filedialog.asksaveasfilename(parent=root, defaultextension=".txt",
-                                          filetypes=[("Text files", "*.txt")],
-                                          title="Save records as...")
-        if not fn: return
-        try:
-            with open(fn, "w", encoding="utf-8") as f:
-                f.write("\n".join(parts))
-            messagebox.showinfo("Saved", f"Records saved to:\n{fn}")
-        except Exception as err:
-            messagebox.showerror("Error", str(err))
+        # center_frame holds the buttons and is packed centered horizontally
+        center_frame = tk.Frame(button_frame, bg=C_OFF_WHITE)
+        center_frame.pack(anchor='center')
+        
+        def proceed_export():
+            fmt = selected_format.get()
+            format_window.destroy()
+            
+            # File extension and type mapping
+            ext_map = {"xlsx": ".xlsx", "pdf": ".pdf"}
+            type_map = {
+                "xlsx": [("Excel files", "*.xlsx")],
+                "pdf": [("PDF files", "*.pdf")]
+            }
+            
+            fn = filedialog.asksaveasfilename(parent=root, 
+                                              defaultextension=ext_map[fmt],
+                                              filetypes=type_map[fmt],
+                                              title="Save records as...")
+            if not fn: return
+            
+            success = False
+            if fmt == "xlsx":
+                success = export_to_excel(fn, rows, rng)
+            elif fmt == "pdf":
+                success = export_to_pdf(fn, rows, rng)
+            
+            if success:
+                messagebox.showinfo("Saved", f"Records saved to:\n{fn}")
+        
+        export_btn = RoundedButton(center_frame, text="✓  Export", bg=C_RED_DARK,
+                       activebackground=C_RED_MID, min_width=100,
+                       command=proceed_export)
+        export_btn.pack(side="left", padx=10)
+        
+        cancel_btn = RoundedButton(center_frame, text="✕  Cancel", bg="#999999",
+                       activebackground="#777777", min_width=100,
+                       command=format_window.destroy)
+        cancel_btn.pack(side="left", padx=10)
 
     dl_btn = RoundedButton(action_group, text="⬇  Export Records",
                             bg=C_GREEN,
@@ -1984,7 +2544,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                             highlightbackground=C_BORDER, highlightthickness=1)
     table_outer.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
-    columns = ("ID", "Full Name", "Contact", "Address", "Purpose", "Date", "Time")
+    columns = ("ID", "Full Name", "Contact", "Address", "Purpose", "Person to See", "Date", "Time")
 
     style2 = ttk.Style()
     style2.theme_use("clam")
@@ -2001,6 +2561,12 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                      foreground=C_WHITE,
                      relief="flat",
                      borderwidth=0)
+    # Make heading text dark gray on hover for better visibility
+    try:
+        style2.map("Modern.Treeview.Heading",
+                   foreground=[('active', C_TEXT_DARK), ('!active', C_WHITE)])
+    except Exception:
+        pass
     style2.map("Modern.Treeview",
                background=[("selected", C_RED_LIGHT)],
                foreground=[("selected", C_RED_DARK)])
@@ -2010,7 +2576,7 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
                         style="Modern.Treeview")
 
     widths = {"ID": 45, "Full Name": 160, "Contact": 120,
-              "Address": 185, "Purpose": 150, "Date": 95, "Time": 65}
+              "Address": 185, "Purpose": 150, "Person to See": 140, "Date": 95, "Time": 65}
     for col in columns:
         tree.heading(col, text=col)
         tree.column(col, width=widths[col],
@@ -2021,9 +2587,11 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
     tree.tag_configure("even", background=C_WHITE)
 
     scrollbar = ttk.Scrollbar(table_outer, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=scrollbar.set)
-    tree.pack(side="left", fill="both", expand=True)
+    h_scrollbar = ttk.Scrollbar(table_outer, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=h_scrollbar.set)
     scrollbar.pack(side="right", fill="y")
+    h_scrollbar.pack(side="bottom", fill="x")
+    tree.pack(side="left", fill="both", expand=True)
 
     def load_table():
         for row in tree.get_children():
@@ -2032,8 +2600,6 @@ def show_admin_screen(root, main_frame, sidebar_nav=None):
         for i, row in enumerate(rows):
             tree.insert("", "end", values=row, tags=("even" if i % 2 == 0 else "odd",))
         record_count_var.set(f"{len(rows)} record(s)")
-        today_label.config(text=f"📊  Today's Visitors: {count_today()}")
-        total_label.config(text=f"  📋  Total Records: {count_all()}")
 
     search_var.trace("w", lambda *_: load_table())
     load_table()
@@ -2228,6 +2794,99 @@ def show_settings_screen(root, main_frame, sidebar_nav=None):
         tk.Label(dev, text=line, font=("Segoe UI", 9),
                  bg=DK_SURFACE, fg=DK_TEXT, anchor="w").pack(fill="x", pady=1)
 
+    # ── Backup Management card ───────────────────────────────
+    bk = dk_card(body_inner,
+                 title="💾  Database Backup",
+                 subtitle="Automatic offline backup to AppData\\Local\\BarangayVisitorLog\\backups")
+
+    # Backup path display
+    path_row = tk.Frame(bk, bg=DK_SURFACE)
+    path_row.pack(fill="x", pady=(0, 10))
+    tk.Label(path_row, text="📂  Backup Folder:",
+             font=("Segoe UI", 9, "bold"), bg=DK_SURFACE, fg=DK_MUTED,
+             width=18, anchor="w").pack(side="left")
+    tk.Label(path_row, text=BACKUP_DIR,
+             font=("Segoe UI", 8), bg=DK_SURFACE, fg=DK_TEXT,
+             wraplength=480, justify="left").pack(side="left")
+
+    # Status label
+    status_var = tk.StringVar(value="")
+    status_lbl = tk.Label(bk, textvariable=status_var,
+                          font=("Segoe UI", 8, "italic"),
+                          bg=DK_SURFACE, fg=C_GREEN, anchor="w")
+    status_lbl.pack(fill="x", pady=(0, 10))
+
+    # Buttons row
+    btn_row = tk.Frame(bk, bg=DK_SURFACE)
+    btn_row.pack(fill="x", pady=(0, 14))
+
+    def do_manual_backup():
+        ok, msg = auto_backup_database(silent=True)
+        status_var.set("✔ " + msg.split("\n")[0] if ok else "✘ " + msg)
+        status_lbl.config(fg=C_GREEN if ok else C_RED_ACCENT)
+        refresh_backup_list()
+
+    manual_btn = RoundedButton(btn_row, text="💾  Backup Now",
+                               bg=C_RED_ACCENT, activebackground=C_RED_DARK,
+                               min_width=160, command=do_manual_backup)
+    manual_btn.pack(side="left", padx=(0, 10))
+
+    def open_backup_folder():
+        folder = get_backup_dir()
+        try:
+            os.startfile(folder)
+        except Exception:
+            import subprocess
+            subprocess.Popen(["xdg-open", folder])
+
+    open_btn = RoundedButton(btn_row, text="📂  Open Folder",
+                             bg=DK_RED, activebackground=C_RED_DARK,
+                             min_width=160, command=open_backup_folder)
+    open_btn.pack(side="left")
+
+    # ── Backup list ──────────────────────────────────────────
+    tk.Frame(bk, bg=DK_BORDER, height=1).pack(fill="x", pady=(6, 12))
+    tk.Label(bk, text="Recent Backups  (max 7 kept)",
+             font=("Segoe UI", 9, "bold"), bg=DK_SURFACE, fg=DK_TEXT).pack(anchor="w", pady=(0, 6))
+
+    list_frame = tk.Frame(bk, bg=DK_SURFACE)
+    list_frame.pack(fill="x")
+
+    backup_rows = []   # keep refs
+
+    def refresh_backup_list():
+        for w in list_frame.winfo_children():
+            w.destroy()
+        backup_rows.clear()
+        backups = get_backup_list()
+        if not backups:
+            tk.Label(list_frame, text="No backups found yet.",
+                     font=("Segoe UI", 8, "italic"),
+                     bg=DK_SURFACE, fg=DK_MUTED).pack(anchor="w")
+            return
+        for i, (fname, fpath, size_kb, modified) in enumerate(backups):
+            row_bg = DK_SURFACE if i % 2 == 0 else DK_SURFACE2
+            row = tk.Frame(list_frame, bg=row_bg, pady=4)
+            row.pack(fill="x")
+
+            info_col = tk.Frame(row, bg=row_bg)
+            info_col.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+            tk.Label(info_col, text=f"  {modified}",
+                     font=("Segoe UI", 8, "bold"), bg=row_bg, fg=DK_TEXT).pack(anchor="w")
+            tk.Label(info_col, text=f"  {fname}   ({size_kb:.1f} KB)",
+                     font=("Segoe UI", 7), bg=row_bg, fg=DK_MUTED).pack(anchor="w")
+
+            restore_btn = RoundedButton(row, text="Restore",
+                                        bg=C_RED_DARK, activebackground=C_RED_ACCENT,
+                                        font=("Segoe UI", 8, "bold"),
+                                        min_width=80,
+                                        command=lambda p=fpath: restore_backup(p, parent=root))
+            restore_btn.pack(side="right", padx=8)
+            backup_rows.append(row)
+
+    refresh_backup_list()
+
     # Spacer at bottom
     tk.Frame(body_inner, bg=DK_BG, height=40).pack()
 
@@ -2252,10 +2911,27 @@ def main():
     root.minsize(900, 560)
     root.configure(bg=C_OFF_WHITE)
     configure_button_styles()
+
+    # Set window icon (taskbar + title bar)
+    try:
+        icon_ico = resource_path(os.path.join("icon", "logo.ico"))
+        icon_png = resource_path(os.path.join("logo", "logo.png"))
+        if os.path.exists(icon_ico):
+            root.iconbitmap(icon_ico)
+        elif os.path.exists(icon_png):
+            from PIL import Image, ImageTk
+            _ico_img = ImageTk.PhotoImage(Image.open(icon_png).resize((32, 32)))
+            root.iconphoto(True, _ico_img)
+    except Exception:
+        pass
+
     try:
         root.state('zoomed')
     except Exception:
         pass
+
+    # Start periodic auto-backup (every 3 hours, only if DB changed)
+    schedule_auto_backup(root)  # runs immediately, then reschedules itself every 3 hours
 
     # ── SIDEBAR ──────────────────────────────────────────────
     sidebar = tk.Frame(root, bg=C_SIDEBAR_BG, width=210)
@@ -2270,7 +2946,7 @@ def main():
     logo_area.pack(fill="x", pady=(20, 0))
 
     logo_dir = os.path.join(os.path.dirname(__file__), "logo")
-    logo_path = os.path.join(logo_dir, "stgo.png")
+    logo_path = os.path.join(logo_dir, "logo.png")
     _sidebar_logos = [None]
     if os.path.exists(logo_path):
         try:
@@ -2439,7 +3115,7 @@ def main():
         if form_vars["date_var"] is not None:
             form_vars["date_var"].set(now.strftime("%Y-%m-%d"))
         if form_vars["time_var"] is not None:
-            form_vars["time_var"].set(now.strftime("%H:%M"))
+            form_vars["time_var"].set(now.strftime("%I:%M %p"))
             
         root.after(1000, update_clock)
     update_clock()
